@@ -5,11 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
-import { profile, assessment, clip, job } from './fixtures.js';
+import { profile as baseProfile, assessment, clip, job } from './fixtures.js';
 import { RUBRIC_VERSION, type AudioDiagnostics, type Job } from '../shared/domain.js';
 import { JudgeAudioError } from '../server/realtime.js';
 import { once } from 'node:events';
 import { createServer, request as httpRequest } from 'node:http';
+
+const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
 
 test('audio uploads accept maximum-length PCM and reject malformed base64 without overflowing', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-upload-'));
@@ -80,6 +82,13 @@ test('evaluation language defaults and market targets reach every judge and role
     };
     assert.equal((await create({ ...base, profile: { ...base.profile, language: ' ' } })).status, 400);
     assert.equal((await create({ ...base, profile: { ...base.profile, targetMarket: 'x'.repeat(501) } })).status, 400);
+    for (const stage of ['audition', 'tts']) for (const speakerMode of ['manual', 'automatic']) {
+      for (const target of ['', '   ', undefined]) {
+        const rejected = await create({ ...base, profile: { ...base.profile, stage, speakerMode, target } });
+        assert.equal(rejected.status, 400);
+        assert.match((await rejected.json()).error, /profile.target/);
+      }
+    }
     assert.equal(calls.length, 0);
     for (const stage of ['audition', 'tts'] as const) for (const speakerMode of ['manual', 'automatic'] as const) {
       const offset = calls.length;

@@ -102,7 +102,7 @@ test('UI connection API applies settings without restart, hides keys and tests e
       clip: { id, voice: 'Example', file: 'one.wav', role: 'speaker', start: 0, end: 1, channel: 'mix', language: 'auto' },
       pcm: Buffer.alloc(48000).toString('base64'),
     });
-    const started = await (await request('/api/jobs', { name: 'Connection test', profile, clipIds: [id], consent: true })).json() as Job;
+    const started = await (await request('/api/jobs', { name: 'Connection test', profile: { ...profile, target: 'Warm delivery' }, clipIds: [id], consent: true })).json() as Job;
     for (let n = 0; n < 100; n++) {
       const current = await (await request(`/api/jobs/${started.id}`)).json() as Job;
       assert.equal(JSON.stringify(current).includes('ui-test-placeholder'), false);

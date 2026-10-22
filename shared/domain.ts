@@ -41,7 +41,7 @@ export const profileSchema = z.object({
   stage: z.enum(['audition', 'tts']),
   scope: z.enum(['single', 'agent', 'customer', 'both']),
   speakerMode: z.enum(['automatic', 'manual']).optional(),
-  target: z.string().trim().max(1500),
+  target: z.string().trim().min(1, 'Enter a target vocal style or test guide before starting the evaluation.').max(1500),
   language: languageHintSchema,
   targetMarket: z.string().trim().max(500).optional(),
 });

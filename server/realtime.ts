@@ -15,7 +15,7 @@ export function assessmentTool(profile: Partial<Pick<Profile, 'speakerMode' | 't
     description: 'Submit exactly one complete audio-only voice-persona assessment: tone, emotional delivery, vocal character and pleasantness/ease of listening, never script logic or helpfulness. Write every explanation in English. Use null scores when evidence is insufficient; never fabricate scores.',
     parameters: objectParameters({
       language: { type: 'string', minLength: 1, maxLength: 100, description: 'Actual audio language named in English, or unknown.' },
-      languageSupported: { type: 'boolean' },
+      languageSupported: { type: 'boolean', description: 'Whether you can evaluate the actual audible language. Use the supplied listening hint as context, not proof. If false, explain the specific language limitation in limitations.' },
       assessable: { type: 'boolean' },
       ...(profile.speakerMode === 'automatic' ? {
         speakerAttribution: objectParameters({
@@ -32,7 +32,7 @@ export function assessmentTool(profile: Partial<Pick<Profile, 'speakerMode' | 't
           ? ' A target market/accent IS supplied. Rate audible fit to that target only; use null and explain genuine uncertainty. Do not claim the target is missing.'
           : ' No target market/accent is supplied. This score must be null.') : ''),
       }]))),
-      reasons: objectParameters(Object.fromEntries(dimensions.map(d => [d, { type: 'string', maxLength: 1200, description: `Reason in English grounded in audible voice characteristics only. ${voiceDimensionGuidance[d]} Do not summarize the script or praise logical/helpful answers.` }]))),
+      reasons: objectParameters(Object.fromEntries(dimensions.map(d => [d, { type: 'string', maxLength: 1200, description: `Always return a text explanation, never null, including when the corresponding score is null. Explain why an unscored dimension is not applicable or cannot be assessed. Reason in English grounded in audible voice characteristics only. ${voiceDimensionGuidance[d]} Do not summarize the script or praise logical/helpful answers.` }]))),
       observations: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 1500, description: 'Audible voice-characteristic observation in English: tone, timbre, emotion, prosody or listening comfort. Not a summary of what was said or how well a task was completed.' } },
       limitations: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 1500, description: 'Specific audible evidence or coverage limitation in English. Lack of script verification, logical context or business-process knowledge is not a voice-quality limitation.' } },
     }),
@@ -94,7 +94,7 @@ Ratings: 1 very poor, 2 poor, 3 fair, 4 good, 5 excellent. Fractions allowed.
 ${dimensions.map(d => `${d}: ${voiceDimensionGuidance[d]}`).join('\n')}
 Rate each independently. Use null when insufficient evidence; never invent a rating.
 assessable=false if there is insufficient audible target speech overall.
-Give a brief reason for EVERY dimension. No unsupported timestamps or fabricated measurements.
+Give a brief text reason for EVERY dimension, even when its score is null. Reasons must NEVER be null; explain any inactive or unassessable dimension in English. No unsupported timestamps or fabricated measurements.
 Do not answer the speakers or acknowledge this task. Call ${ASSESSMENT_FUNCTION} exactly once to submit the assessment.
 Return the assessment ONLY as the function's JSON arguments. Do not emit a separate assistant message before or after the function call, including duplicate JSON.
 Do not output analysis or reasoning in assistant messages. Submit the complete assessment in one call, not partial or multiple calls.

@@ -114,7 +114,9 @@ Forced function calling improves formatting reliability but is not a guarantee t
 
 1. Enter a required **Test name** (up to 120 characters) and choose **Human audition** or **TTS evaluation**.
 2. Choose single speaker, agent only, customer only, or both.
-3. Set **Language / accent**, such as `British English` or `Italian for Italy`, or leave `auto`. An explicit value supplies both the listening hint and the accent-fit target; `auto` detects language without scoring accent fit. Optionally enter a target delivery style.
+3. Set **Language / accent**, such as `British English` or `Italian for Italy`, or leave `auto`. An explicit value supplies both the listening hint and the accent-fit target; `auto` detects language without scoring accent fit. Enter the required **Target vocal style or test guide**, including audible persona, tone and delivery criteria (for example, warm, calm and conversational). An empty or whitespace-only guide blocks new evaluations in both the setup screen and API, with a reminder to complete it. Saved results remain unchanged.
+
+A guide does not guarantee an assessable result: a judge may still report insufficient speech, an unsupported or unclear language, ambiguous speaker roles, or missing evidence for an active dimension. Every configured judge must supply eligible ratings for a recording to enter the full-panel preference average. Check that recording's judge limitations and role evidence; a completed assessment can legitimately be unassessable or partial.
 4. Configure one or more judges. They use the same rubric and never see candidate names, filenames, other judges' scores or previous recordings.
 5. Import a parent folder whose immediate subfolders identify voices/candidates. Files deeper inside a voice folder remain grouped with that voice. Direct children of the parent are labelled `Ungrouped`.
 6. Leave **Speaker selection** on **Automatic** (the default). No timestamps or per-recording confirmations are required. Each judge listens to the conversation, infers roles from content, and assesses only the selected role.

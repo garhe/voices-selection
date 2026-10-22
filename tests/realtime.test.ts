@@ -133,7 +133,11 @@ test('assessment tool requires every field and dimension, constrains scores and 
       type: ['number', 'null'], minimum: bounds.minValue, maximum: bounds.maxValue,
     });
     assert.equal(manual.parameters.properties.reasons.properties[dimension].maxLength, assessmentSchema.shape.reasons.shape[dimension].maxLength);
+    assert.equal(manual.parameters.properties.reasons.properties[dimension].type, 'string');
+    assert.match(manual.parameters.properties.reasons.properties[dimension].description, /never null, including when the corresponding score is null/);
   }
+  assert.match(instructions(profile), /Reasons must NEVER be null/);
+  assert.match(manual.parameters.properties.languageSupported.description, /listening hint as context, not proof/);
   assert.ok(automatic.parameters.required.includes('speakerAttribution'));
   assert.deepEqual(automatic.parameters.properties.speakerAttribution?.properties.role.enum, ['customer']);
 });

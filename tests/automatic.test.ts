@@ -34,7 +34,7 @@ test('automatic windows cover the entire file for each requested role without us
 });
 test('automatic readiness never requires per-file review but still requires credentials, a panel and consent', () => {
   const input: Parameters<typeof evaluationBlockers>[0] = {
-    name: 'Automatic conversation test', profile: automatic, speakerMode: 'automatic', scope: 'both', consent: true, busy: false, running: false,
+    name: 'Automatic conversation test', profile: { ...automatic, target: 'Warm delivery' }, speakerMode: 'automatic', scope: 'both', consent: true, busy: false, running: false,
     config: { configured: true, judges: [{ id: crypto.randomUUID(), name: 'Judge', deployment: 'test' }] },
     recordings: [{ include: true, regions: [] }, { include: true, regions: [] }],
   };
@@ -48,7 +48,7 @@ test('automatic input counts include every window and both roles for the 200-inp
   const recordings = [{ include: true, regions: [], duration: 120.1 }];
   assert.equal(inputCount(recordings, 'both', 'automatic'), 4);
   const blockers = evaluationBlockers({
-    name: 'Large run', profile: automatic, scope: 'both', speakerMode: 'automatic', consent: true, busy: false, running: false,
+    name: 'Large run', profile: { ...automatic, target: 'Warm delivery' }, scope: 'both', speakerMode: 'automatic', consent: true, busy: false, running: false,
     config: { configured: true, judges: [{ id: crypto.randomUUID(), name: 'Judge', deployment: 'test' }] },
     recordings: Array.from({ length: 51 }, () => recordings[0]),
   });

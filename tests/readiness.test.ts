@@ -4,7 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { applyLanguageHint, evaluationBlockers, recordingReviewed, withLanguageAccent } from '../src/readiness.js';
 import { activeDimensions, profileSchema } from '../shared/domain.js';
 import type { Region } from '../src/audio.js';
-import { clip, profile } from './fixtures.js';
+import { clip, profile as baseProfile } from './fixtures.js';
+
+const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
 
 function region(role: Region['role'] = 'speaker', confirmed = true): Region {
   return { id: randomUUID(), role, confirmed, start: 0, end: 1, channel: 'mix' };
@@ -27,6 +29,19 @@ test('a complete setup is startable and every disabled condition has an explanat
   assert.ok(blockers.some(b => /Azure settings/.test(b)));
   assert.ok(blockers.some(b => /audio folder/.test(b)));
   assert.ok(blockers.some(b => /permission checkbox/.test(b)));
+});
+test('a missing or whitespace-only target guide blocks imported and saved inputs in both stages and modes', () => {
+  for (const stage of ['audition', 'tts'] as const) for (const speakerMode of ['manual', 'automatic'] as const) {
+    for (const target of ['', '   ']) for (const saved of [false, true]) {
+      const input = readyInput();
+      input.profile = { ...profile, stage, speakerMode, target };
+      input.speakerMode = speakerMode;
+      if (saved) input.savedClips = [{ ...clip(), include: true }];
+      assert.ok(evaluationBlockers(input).some(b => /target vocal style or test guide/.test(b)));
+    }
+  }
+  assert.equal(profileSchema.parse({ ...profile, target: ' Warm delivery. ' }).target, 'Warm delivery.');
+  assert.equal(profileSchema.safeParse({ ...profile, target: 'x'.repeat(1501) }).success, false);
 });
 test('one language/accent value drives listening and accent fit without changing other setup settings', () => {
   const original = { ...profile, stage: 'tts' as const, speakerMode: 'automatic' as const, target: 'Warm and calm.', language: 'Italian', targetMarket: 'Italian for Italy' };
