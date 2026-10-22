@@ -1,0 +1,344 @@
+import { z } from 'zod';
+
+export const RUBRIC_VERSION = 'audio-only-v4';
+export const SAMPLE_RATE = 24000;
+export const MAX_SECONDS = 120;
+export const dimensions = ['naturalness', 'articulation', 'pace', 'expressiveness', 'contextFit', 'accentFit', 'audioQuality'] as const;
+export type Dimension = typeof dimensions[number];
+export const labels: Record<Dimension, string> = {
+  naturalness: 'Naturalness', articulation: 'Articulation', pace: 'Pace & rhythm',
+  expressiveness: 'Expressiveness', contextFit: 'Target-style fit', accentFit: 'Target-market accent fit', audioQuality: 'Audio quality',
+};
+export const voiceDimensionGuidance: Record<Dimension, string> = {
+  naturalness: 'Believable, unforced vocal persona: conversational flow, comfortable voice texture and ease of sustained listening. Do not rate whether the wording sounds logical or helpful.',
+  articulation: 'Audible speech clarity and effortless listening: clean word boundaries and comfortably intelligible sounds, not simplicity of vocabulary, quality of explanations or script correctness. Do not penalize an accent merely for being different.',
+  pace: 'Comfortable vocal rhythm, phrasing, breath flow and pauses without a rushed or dragging feel. Judge listening effort, not how efficiently the script solves a problem; slower is not automatically better.',
+  expressiveness: 'Audible emotional color, warmth, engagement and controlled intonation that make the voice agreeable to listen to. Calm or restrained delivery can be excellent; neither maximum emotion nor empathetic wording earns an automatic bonus.',
+  contextFit: 'Fit of the audible voice persona, tone and emotional delivery to the supplied vocal style only. Ignore script, factual, logical, business-process and task-completion requirements in the target.',
+  accentFit: 'Fit of audible pronunciation, vowel/consonant patterns, stress and intonation to the explicitly supplied target market/accent, allowing its stated regional variation. Judge listener suitability, not personal accent preference, nationality, ethnicity, identity or supposed native-speaker status. Do not infer accent fit from the language hint or script, and do not penalize the same market mismatch again in other dimensions.',
+  audioQuality: 'Audible fidelity, noise, distortion, dropouts and synthetic artifacts, not the quality of the spoken content. Diagnostic only for human auditions; included for TTS.',
+};
+export const judgeSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1).max(80),
+  deployment: z.string().trim().min(1).max(120).regex(/^[a-zA-Z0-9._-]+$/),
+});
+export const settingsSchema = z.object({
+  judges: z.array(judgeSchema).min(1),
+}).superRefine((value, ctx) => {
+  if (new Set(value.judges.map(j => j.id)).size !== value.judges.length)
+    ctx.addIssue({ code: 'custom', message: 'Judge IDs must be unique.' });
+});
+export type Settings = z.infer<typeof settingsSchema>;
+export type Judge = z.infer<typeof judgeSchema>;
+export type ConnectionStatus = {
+  configured: boolean; endpoint: string; keyStored: boolean;
+  connectionSource: 'saved' | 'environment' | 'none'; secureStorageAvailable: boolean;
+};
+export type ConnectionTest = { judgeId: string; ok: boolean; model?: string; error?: string };
+export const languageHintSchema = z.string().trim().min(1, 'Enter a language/accent target or use auto.').max(500, 'Use at most 500 characters for the language/accent target.');
+export const profileSchema = z.object({
+  stage: z.enum(['audition', 'tts']),
+  scope: z.enum(['single', 'agent', 'customer', 'both']),
+  speakerMode: z.enum(['automatic', 'manual']).optional(),
+  target: z.string().trim().max(1500),
+  language: languageHintSchema,
+  targetMarket: z.string().trim().max(500).optional(),
+});
+export type Profile = z.infer<typeof profileSchema>;
+export function resolveLanguageHint(recordingHint: string, evaluationHint: string): string {
+  const hint = languageHintSchema.parse(recordingHint);
+  return hint.toLowerCase() === 'auto' ? languageHintSchema.parse(evaluationHint) : hint;
+}
+export const clipSchema = z.object({
+  id: z.string().uuid(),
+  voice: z.string().trim().min(1).max(200),
+  file: z.string().min(1).max(500),
+  role: z.enum(['speaker', 'agent', 'customer']),
+  start: z.number().nonnegative(),
+  end: z.number().positive(),
+  channel: z.enum(['mix', 'left', 'right']),
+  language: languageHintSchema,
+}).refine(c => c.end > c.start && c.end - c.start <= MAX_SECONDS + 0.001, {
+  message: `Select a region longer than 0 and no longer than ${MAX_SECONDS} seconds.`,
+});
+export type Clip = z.infer<typeof clipSchema>;
+export function rolesForScope(scope: Profile['scope']): Clip['role'][] {
+  return scope === 'single' ? ['speaker'] : scope === 'both' ? ['agent', 'customer'] : [scope];
+}
+export type Technical = { peakDb: number | null; rmsDb: number | null; clippingPercent: number; quietPercent: number; seconds: number };
+export type StoredClip = Clip & { technical: Technical };
+export type DraftClip = StoredClip & { include: boolean };
+export function clipScopeError(scope: Profile['scope'], clips: Clip[]): string | undefined {
+  const wanted = rolesForScope(scope);
+  if (clips.some(c => !wanted.includes(c.role))) return 'Selected excerpts do not match the speaker scope.';
+  const files = new Set(clips.map(c => JSON.stringify([c.voice, c.file])));
+  for (const file of files) {
+    const selected = clips.filter(c => JSON.stringify([c.voice, c.file]) === file);
+    if (wanted.some(role => !selected.some(c => c.role === role)))
+      return 'Every recording needs a confirmed region for each selected role.';
+    for (const role of wanted) {
+      const regions = selected.filter(c => c.role === role).sort((a, b) => a.start - b.start);
+      if (regions.some((c, i) => i > 0 && c.start < regions[i - 1].end))
+        return 'Regions for the same role must not overlap; this would double-count speech.';
+    }
+  }
+}
+export const assessmentSchema = z.object({
+  language: z.string().min(1).max(100),
+  languageSupported: z.boolean(),
+  assessable: z.boolean(),
+  speakerAttribution: z.object({
+    role: z.enum(['speaker', 'agent', 'customer']),
+    status: z.enum(['identified', 'not_present', 'uncertain']),
+    evidence: z.string().trim().min(1).max(1500),
+  }).strict().optional(),
+  scores: z.object({
+    naturalness: z.number().min(1).max(5).nullable(),
+    articulation: z.number().min(1).max(5).nullable(),
+    pace: z.number().min(1).max(5).nullable(),
+    expressiveness: z.number().min(1).max(5).nullable(),
+    contextFit: z.number().min(1).max(5).nullable(),
+    accentFit: z.number().min(1).max(5).nullable(),
+    audioQuality: z.number().min(1).max(5).nullable(),
+  }).strict(),
+  reasons: z.object({
+    naturalness: z.string().max(1200), articulation: z.string().max(1200),
+    pace: z.string().max(1200), expressiveness: z.string().max(1200),
+    contextFit: z.string().max(1200), accentFit: z.string().max(1200), audioQuality: z.string().max(1200),
+  }).strict(),
+  observations: z.array(z.string().max(1500)).max(12),
+  limitations: z.array(z.string().max(1500)).max(12),
+}).strict();
+export type Assessment = z.infer<typeof assessmentSchema>;
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+export type AssessmentResponseFormat = 'function_call' | 'function_call_with_preamble' | 'json_text' | 'wrapped_json_text';
+export type AudioResponseDiagnostic = {
+  inputAudioTokens?: number; inputTextTokens?: number; outputTokens?: number;
+  outputTypes: string[];
+  outcome: 'accepted' | 'invalid_format' | 'incomplete' | 'missing_audio_claim' | 'zero_audio_tokens';
+};
+export type AudioDiagnostics = {
+  inputBytes: number; inputSha256: string;
+  recovery: 'not_needed' | 'recovered' | 'unresolved';
+  sessions: {
+    uploadedBytes: number; committed: boolean; model?: string; error?: string;
+    responses: AudioResponseDiagnostic[];
+  }[];
+};
+export type JudgeEvaluation = {
+  status: TaskStatus;
+  assessment?: Assessment; error?: string; model?: string; responseFormat?: AssessmentResponseFormat;
+  audioDiagnostics?: AudioDiagnostics;
+};
+export type JudgeResult = JudgeEvaluation & {
+  clipId: string; judgeId: string;
+  previousEvaluations?: (JudgeEvaluation & { retriedAt: string })[];
+};
+export const testNameSchema = z.string().trim().min(1, 'Enter a test name.').max(120, 'Use at most 120 characters for the test name.');
+export type Job = {
+  id: string; name?: string; createdAt: string; status: 'running' | 'completed' | 'cancelled' | 'interrupted';
+  profile: Profile; judges: Judge[]; clips: StoredClip[]; results: JudgeResult[];
+  rubric: string;
+};
+export function evaluationName(value: { name?: string }): string {
+  return value.name?.trim() || 'Untitled evaluation';
+}
+
+export function activeDimensions(profile: Profile): Dimension[] {
+  return dimensions.filter(d => (d !== 'audioQuality' || profile.stage === 'tts') &&
+    (d !== 'contextFit' || !!profile.target) && (d !== 'accentFit' || !!profile.targetMarket?.trim()));
+}
+export function mean(values: number[]): number | null {
+  return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+}
+export function eligibleScore(assessment: Assessment, profile: Profile): number | null {
+  if (profile.speakerMode === 'automatic' && assessment.speakerAttribution?.status !== 'identified') return null;
+  if (!assessment.assessable || !assessment.languageSupported) return null;
+  const scores = activeDimensions(profile).map(d => assessment.scores[d]);
+  if (!scores.every((s): s is number => typeof s === 'number' && Number.isFinite(s))) return null;
+  return mean(scores);
+}
+export function claimsMissingAudio(assessment: Assessment): boolean {
+  if (assessment.assessable && assessment.languageSupported) return false;
+  if (assessment.speakerAttribution?.status === 'not_present') return false;
+  const text = [...assessment.limitations, ...Object.values(assessment.reasons), assessment.speakerAttribution?.evidence ?? ''].join('\n');
+  return [
+    /\bno (?:actual |original |input |audible )?(?:audio|recording)(?: content| recording| signal)? (?:was |is |has been )?(?:provided|included|presented|available|supplied)\b/i,
+    /\bwithout (?:the |an? )?(?:actual |original |accompanying |any )?(?:audio|audible (?:recording|signal))\b/i,
+    /\b(?:audio|audible (?:recording|signal)) (?:was |is )?(?:not (?:audibly )?(?:provided|included|available|presented)|missing|absent)\b/i,
+    /\b(?:lack|absence) of (?:actual |audible |original )?audio(?: content| input| recording| signal)?\b/i,
+    /\bnon-audio representation\b/i,
+    /\b(?:cannot|can't|unable to) (?:access|hear|listen to) (?:the |any |actual |original )?audio\b/i,
+  ].some(pattern => pattern.test(text));
+}
+export function retryableAudioIssue(result: JudgeResult): boolean {
+  return result.status === 'completed' && !!result.assessment && claimsMissingAudio(result.assessment);
+}
+export function normalizeAssessment(value: unknown, profile: Profile, role?: Clip['role']): Assessment {
+  const assessment = assessmentSchema.parse(value);
+  if (profile.speakerMode === 'automatic') {
+    if (!role || !assessment.speakerAttribution || assessment.speakerAttribution.role !== role)
+      throw new Error('Automatic role evaluation requires attribution for the requested speaker role.');
+    if (assessment.speakerAttribution.status !== 'identified') {
+      assessment.assessable = false;
+      for (const d of dimensions) {
+        assessment.scores[d] = null;
+        assessment.reasons[d] = `Not scored: role ${assessment.speakerAttribution.status}. ${assessment.speakerAttribution.evidence}`;
+      }
+    }
+  }
+  if (!profile.target) {
+    assessment.scores.contextFit = null;
+    assessment.reasons.contextFit = 'Not assessed: no target style was supplied.';
+  }
+  if (!profile.targetMarket?.trim()) {
+    assessment.scores.accentFit = null;
+    assessment.reasons.accentFit = 'Not assessed: no target market/accent was supplied.';
+  }
+  if (!assessment.assessable || !assessment.languageSupported) {
+    for (const d of dimensions) if (d !== 'audioQuality') assessment.scores[d] = null;
+  }
+  return assessment;
+}
+
+export type Summary = {
+  voice: string; role: string; files: number; eligibleFiles: number;
+  score: number | null; min: number | null; max: number | null;
+  dimensions: Record<Dimension, number | null>; disagreement: number | null; languages: string[];
+  absentWindows: number;
+};
+export function summarize(job: Job): Summary[] {
+  const groups = new Map<string, StoredClip[]>();
+  for (const c of job.clips) {
+    const key = JSON.stringify([c.voice, c.role]);
+    groups.set(key, [...(groups.get(key) ?? []), c]);
+  }
+  return [...groups.values()].map(clips => {
+    const fileGroups = new Map<string, StoredClip[]>();
+    for (const c of clips) fileGroups.set(c.file, [...(fileGroups.get(c.file) ?? []), c]);
+    const dimensionFiles: Record<Dimension, number[]> = {
+      naturalness: [], articulation: [], pace: [], expressiveness: [], contextFit: [], accentFit: [], audioQuality: [],
+    };
+    const fileScores: number[] = [];
+    const spreads: number[] = [];
+    const languages = new Set<string>();
+    let absentWindows = 0;
+    for (const fileClips of fileGroups.values()) {
+      let requiredRegions = fileClips.length;
+      const regionScores: { score: number; seconds: number }[] = [];
+      const dimensionRegions: Record<Dimension, { score: number; seconds: number }[]> = {
+        naturalness: [], articulation: [], pace: [], expressiveness: [], contextFit: [], accentFit: [], audioQuality: [],
+      };
+      for (const c of fileClips) {
+        const results = job.results.filter(r => r.clipId === c.id && r.status === 'completed' && r.assessment);
+        for (const r of results) if (r.assessment) languages.add(r.assessment.language);
+        // A consensus requires the complete configured panel, not just whichever judges succeeded.
+        if (results.length !== job.judges.length) continue;
+        if (job.profile.speakerMode === 'automatic' && results.every(r =>
+          r.assessment!.languageSupported && r.assessment!.speakerAttribution?.role === c.role &&
+          r.assessment!.speakerAttribution.status === 'not_present')) {
+          absentWindows++; requiredRegions--; continue;
+        }
+        const scores = results.map(r => eligibleScore(r.assessment!, job.profile));
+        const seconds = c.end - c.start;
+        if (scores.every((s): s is number => s !== null)) {
+          regionScores.push({ score: mean(scores)!, seconds });
+          spreads.push(Math.max(...scores) - Math.min(...scores));
+        }
+        for (const d of dimensions) {
+          const values = results.map(r => {
+            const a = r.assessment!;
+            return d === 'audioQuality' || (a.assessable && a.languageSupported) ? a.scores[d] : null;
+          });
+          if (values.every((s): s is number => typeof s === 'number' && Number.isFinite(s)))
+            dimensionRegions[d].push({ score: mean(values)!, seconds });
+        }
+      }
+      const weighted = (values: { score: number; seconds: number }[]) =>
+        values.reduce((total, v) => total + v.score * v.seconds, 0) / values.reduce((total, v) => total + v.seconds, 0);
+      // Every selected region must be eligible before its recording enters the overall average.
+      if (requiredRegions > 0 && regionScores.length === requiredRegions) fileScores.push(weighted(regionScores));
+      for (const d of dimensions) if (requiredRegions > 0 && dimensionRegions[d].length === requiredRegions)
+        dimensionFiles[d].push(weighted(dimensionRegions[d]));
+    }
+    return {
+      voice: clips[0].voice, role: clips[0].role, files: fileGroups.size, eligibleFiles: fileScores.length,
+      score: mean(fileScores), min: fileScores.length ? Math.min(...fileScores) : null,
+      max: fileScores.length ? Math.max(...fileScores) : null,
+      dimensions: Object.fromEntries(dimensions.map(d => [d, mean(dimensionFiles[d])])) as Summary['dimensions'],
+      disagreement: mean(spreads), languages: [...languages], absentWindows,
+    };
+  }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+}
+
+export function assessmentGaps(result: JudgeResult | undefined, profile: Profile, role: Clip['role']): string[] {
+  if (!result) return ['Assessment is missing.'];
+  if (result.status !== 'completed') return [`Assessment ${result.status}${result.error ? `: ${result.error}` : '.'}`];
+  const a = result.assessment;
+  if (!a) return ['Completed response contains no assessment.'];
+  const gaps: string[] = [];
+  if (claimsMissingAudio(a)) {
+    const audioTokens = result.audioDiagnostics?.sessions.at(-1)?.responses.at(-1)?.inputAudioTokens;
+    gaps.push(audioTokens !== undefined && audioTokens > 0
+      ? `Suspected judge audio-access misreport: Azure counted ${audioTokens} input audio tokens, but the judge claimed audio was missing. Scores remain withheld.`
+      : 'Suspected missing-audio claim. Audio-token receipt is not confirmed; retry this input with audio-delivery diagnostics.');
+  }
+  if (profile.speakerMode === 'automatic' && (a.speakerAttribution?.status !== 'identified' || a.speakerAttribution.role !== role))
+    gaps.push(`Requested ${role} role ${a.speakerAttribution?.status ?? 'not attributed'}: ${a.speakerAttribution?.evidence ?? 'Role evidence is missing.'}`);
+  if (!a.languageSupported) gaps.push(`The judge could not reliably assess the audio language (${a.language}).`);
+  if (!a.assessable) gaps.push('The judge reported insufficient assessable target speech.');
+  if (!gaps.length) for (const d of activeDimensions(profile)) if (typeof a.scores[d] !== 'number')
+    gaps.push(`${labels[d]} rating missing${d === 'contextFit' && profile.target ? ' (the test supplied a target)' : d === 'accentFit' && profile.targetMarket?.trim() ? ' (the test supplied a target market/accent)' : ''}: ${a.reasons[d] || 'No reason was provided.'}`);
+  return gaps;
+}
+
+export type EvidenceNote = { text: string; files: string[] };
+export type VoiceEvidence = {
+  voice: string; role: string; files: number; eligibleFiles: number; score: number | null;
+  judges: {
+    judgeId: string; scoredFiles: number; score: number | null;
+    gaps: EvidenceNote[]; observations: EvidenceNote[]; limitations: EvidenceNote[];
+    dimensions: { dimension: Dimension; score: number | null; diagnostic: boolean; reasons: EvidenceNote[] }[];
+  }[];
+};
+export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
+  const notes = (values: { text: string; file: string }[]): EvidenceNote[] => {
+    const grouped = new Map<string, Set<string>>();
+    for (const value of values) {
+      const text = value.text.trim().replace(/\s+/g, ' ');
+      if (text) {
+        if (!grouped.has(text)) grouped.set(text, new Set());
+        grouped.get(text)!.add(value.file);
+      }
+    }
+    return [...grouped].map(([text, files]) => ({ text, files: [...files].sort() }))
+      .sort((a, b) => b.files.length - a.files.length || a.text.localeCompare(b.text, 'en'));
+  };
+  return summarize(job).map(summary => {
+    const clips = job.clips.filter(c => c.voice === summary.voice && c.role === summary.role);
+    return {
+      voice: summary.voice, role: summary.role, files: summary.files, eligibleFiles: summary.eligibleFiles, score: summary.score,
+      judges: job.judges.map(judge => {
+        const entries = clips.map(clip => ({ clip, result: job.results.find(r => r.clipId === clip.id && r.judgeId === judge.id) }));
+        const completed = entries.filter(entry => entry.result?.status === 'completed' && entry.result.assessment);
+        const own = summarize({ ...job, clips, judges: [judge], results: job.results.filter(r => r.judgeId === judge.id) })[0];
+        return {
+          judgeId: judge.id, scoredFiles: own.eligibleFiles, score: own.score,
+          gaps: notes(entries.flatMap(({ clip, result }) => assessmentGaps(result, job.profile, clip.role).map(text => ({ text, file: clip.file })))),
+          observations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.observations.map(text => ({ text, file: clip.file })))),
+          limitations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.limitations.map(text => ({ text, file: clip.file })))),
+          dimensions: dimensions.filter(d => activeDimensions(job.profile).includes(d) || d === 'audioQuality').map(d => ({
+            dimension: d, score: own.dimensions[d], diagnostic: d === 'audioQuality' && job.profile.stage === 'audition',
+            reasons: notes(completed.flatMap(({ clip, result }) => {
+              const a = result!.assessment!;
+              const identified = job.profile.speakerMode !== 'automatic' || (a.speakerAttribution?.status === 'identified' && a.speakerAttribution.role === clip.role);
+              return identified && a.scores[d] !== null && (d === 'audioQuality' || (a.assessable && a.languageSupported))
+                ? [{ text: a.reasons[d], file: clip.file }] : [];
+            })),
+          })),
+        };
+      }),
+    };
+  });
+}
