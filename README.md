@@ -2,7 +2,9 @@
 
 A local React + Node.js application for audio-only human auditions and TTS evaluation. Configure one or more Azure OpenAI Realtime deployments as independent listening judges, with no fixed panel-size limit. Each additional judge increases Azure usage and concurrent requests; deployment quotas still apply. No reference script is needed, and no transcript is requested or stored.
 
-The interface uses a Mica-inspired tinted backdrop, softly translucent panels and subtle surface highlights. This is a browser-rendered effect, not native Windows Mica or access to your desktop wallpaper. Browsers without backdrop-filter support use opaque surfaces; reduced-transparency and Windows high-contrast preferences remove the translucent treatment. Existing data directories and launcher filenames are unchanged by the display-name update.
+The interface uses a Mica-inspired tinted backdrop with frosted-glass cards, translucent controls and nested panels, subtle edge highlights and soft shadows. Backdrop blur lets the muted green, blue and warm background tones show through while keeping text opaque and readable. This is a browser-rendered effect, not native Windows Mica or access to your desktop wallpaper. Browsers without backdrop-filter support use opaque surfaces; reduced-transparency and Windows high-contrast preferences remove the translucent treatment. Existing data directories and launcher filenames are unchanged by the display-name update.
+
+Typography uses a shared 12-15 px scale for captions, metadata, controls and body text, with larger headings. History entries have larger, higher-contrast text and a wider desktop sidebar. The Recent Evaluations heading stays fixed while its entries scroll. Scrollable history, recording lists and tables use slim, muted-green scrollbars with transparent tracks; Windows high-contrast mode retains native scrollbar colors and sizing.
 
 ## Start
 
@@ -112,7 +114,7 @@ Forced function calling improves formatting reliability but is not a guarantee t
 
 ## Workflow
 
-1. Enter a required **Test name** (up to 120 characters) and choose **Human audition** or **TTS evaluation**.
+1. Enter a required **Test name** (up to 120 characters) and choose **Voice Selection** or **TTS evaluation**. Required fields use an inline `*`; native required-field validation remains enabled. Detailed criteria and language guidance are available in the collapsed **Evaluation guide**.
 2. Choose single speaker, agent only, customer only, or both.
 3. Set **Language / accent**, such as `British English` or `Italian for Italy`, or leave `auto`. An explicit value supplies both the listening hint and the accent-fit target; `auto` detects language without scoring accent fit. Enter the required **Target vocal style or test guide**, including audible persona, tone and delivery criteria (for example, warm, calm and conversational). An empty or whitespace-only guide blocks new evaluations in both the setup screen and API, with a reminder to complete it. Saved results remain unchanged.
 
@@ -135,7 +137,7 @@ All judge-authored comments are required to be in **English**, regardless of the
 
 ### One language/accent setting and accent fit
 
-The single evaluation **Language / accent** field applies to all stages (human audition and TTS), speaker-selection modes, roles and judges. For example, `British English` supplies both the listening-language hint and the accent-fit target; a longer value can specify acceptable regional variation. Use at most 500 characters. `auto` (case-insensitive) requests language detection and leaves accent fit inactive. There is no separate target-market input in Setup.
+The single evaluation **Language / accent** field applies to all stages (Voice Selection and TTS), speaker-selection modes, roles and judges. For example, `British English` supplies both the listening-language hint and the accent-fit target; a longer value can specify acceptable regional variation. Use at most 500 characters. `auto` (case-insensitive) requests language detection and leaves accent fit inactive. There is no separate target-market input in Setup.
 
 A recording or saved input set to `auto` inherits the evaluation listening hint; an explicit per-input hint overrides listening context only, not the evaluation-wide accent target. **Apply to all recordings** copies the evaluation value to every loaded recording or saved audio input, including excluded inputs, replacing previous listening overrides in the draft. Individual overrides remain editable afterwards. This action does not start an evaluation, call Azure, modify original audio, or change past reports. New imports default to `auto` and inherit the evaluation setting.
 
@@ -203,7 +205,7 @@ Manual mode sends only selected excerpts without surrounding conversation. Neith
 - Conversational meaning is used only when necessary to attribute agent/customer roles. Role evidence is kept separate from scores; reasons and observations must describe audible vocal traits, not summarize service actions. Warmth and empathy must be audible in tone and prosody, not merely present in reassuring words. Calm or understated voices can score highly without exaggerated emotion.
 - Target-style fit uses only the supplied target's **vocal persona, tone and delivery** criteria. Content or business requirements in a target never override the voice-only rubric. If the target contains no usable vocal-style criteria, judges must explain that limitation rather than invent a fit score. The setup screen shows the dimension guidance used in the prompt and assessment function schema.
 - All subjective scores are **uncalibrated model opinions**, 1 (very poor) through 5 (excellent), **not human MOS or validated predicted MOS**. This version does not bundle a dedicated MOS predictor.
-- Human audition preference averages naturalness, articulation, pace and expressiveness, plus target-style fit only if supplied and target-market accent fit only if supplied. Microphone/recording quality is a separate diagnostic and does not enter the preference score.
+- Voice Selection (stored internally as `audition` for compatibility) preference averages naturalness, articulation, pace and expressiveness, plus target-style fit only if supplied and target-market accent fit only if supplied. Microphone/recording quality is a separate diagnostic and does not enter the preference score.
 - TTS preference also includes audio quality. Audition and TTS runs are never combined into one ranking.
 - Missing, unassessable or unsupported dimensions produce **no overall preference score**, not a zero or silently reweighted score.
 - Consensus for each region requires the complete configured judge panel. In automatic mode, a window is skipped only when every judge understands the language and agrees that the requested role is **not_present**; excluded-window counts are shown. Ambiguous/unsupported roles, attribution disagreements and failed judges prevent the recording from entering the preference average. An entirely role-absent recording has no score, not a zero.

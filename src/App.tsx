@@ -469,14 +469,16 @@ export function App() {
       <button className={`nav ${tab === 'results' ? 'active' : ''}`} onClick={() => setTab('results')}><span>02</span> Results & comparison</button>
       <div className="sidebar-history">
         <p className="nav-label">RECENT EVALUATIONS</p>
-        {!history.length && <p className="muted small">Your evaluations will appear here.</p>}
-        {history.map(h => <button key={h.id} className="history-item" disabled={!!busy} onClick={() => void action('Loading evaluation', async () => {
-          setJob(await api<Job>(`/api/jobs/${h.id}`)); setLanguageFilter('all'); setTab('results');
-        })}>
-          <strong>{evaluationName(h)}</strong>
-          <small>{h.stage === 'audition' ? 'Human audition' : 'TTS evaluation'} · {new Date(h.createdAt).toLocaleString()}</small>
-          <small>{h.clips} excerpts · {h.status}</small>
-        </button>)}
+        <div className="history-list">
+          {!history.length && <p className="muted small">Your evaluations will appear here.</p>}
+          {history.map(h => <button key={h.id} className="history-item" disabled={!!busy} onClick={() => void action('Loading evaluation', async () => {
+            setJob(await api<Job>(`/api/jobs/${h.id}`)); setLanguageFilter('all'); setTab('results');
+          })}>
+            <strong>{evaluationName(h)}</strong>
+            <small>{h.stage === 'audition' ? 'Voice Selection' : 'TTS evaluation'} · {new Date(h.createdAt).toLocaleString()}</small>
+            <small>{h.clips} excerpts · {h.status}</small>
+          </button>)}
+        </div>
       </div>
       <div className="sidebar-foot"><span className={`dot ${config?.configured ? 'green' : ''}`} /> {config?.configured ? 'Azure credentials configured' : 'Azure setup required'}<small>Local-first · Audio-only assessment</small></div>
     </aside>
@@ -492,22 +494,21 @@ export function App() {
       </section>}
       {tab === 'setup' ? <>
         <section className="hero">
-          <div><p className="eyebrow">LISTEN CLOSER. COMPARE FAIRLY.</p><h1>Find the right voice.</h1><p>One workspace for human auditions and synthetic voices.<br />Independent AI opinions, with the evidence kept in view.</p></div>
+          <div><p className="eyebrow">LISTEN CLOSER. COMPARE FAIRLY.</p><h1>Find the right voice.</h1></div>
           <div className="hero-art" aria-hidden="true">{Array.from({ length: 23 }, (_, i) => <i key={i} style={{ height: `${18 + Math.sin(i * 1.7) ** 2 * 72}px` }} />)}</div>
         </section>
         <section className="card test-identity">
           {draftSource && <p className="hint">Editable copy of {draftSource}. Starting creates a new evaluation; the original results stay unchanged.</p>}
-          <label>Test name <span className="muted">(required)</span><input required maxLength={120} value={testName} disabled={!!busy} onChange={e => setTestName(e.target.value)} placeholder="For example: Customer service auditions - round 1" /></label>
-          <p className="hint">Saved with the evaluation and included in history and exports. Each run also has its own unique ID and timestamp. The name is not sent to the judges.</p>
+          <label><span>Test name <span className="required-mark" aria-hidden="true">*</span></span><input required maxLength={120} value={testName} disabled={!!busy} onChange={e => setTestName(e.target.value)} placeholder="For example: Voice selection - round 1" /></label>
         </section>
         <div className="setup-grid">
           <section className="card"><SectionTitle step="01" title="Choose your evaluation" description="Different stages deserve different criteria." />
             <div className="stage-options">
               <button className={`stage-card ${profile.stage === 'audition' ? 'chosen' : ''}`} onClick={() => setProfile({ ...profile, stage: 'audition' })}>
-                <span className="stage-icon">◉</span><strong>Human audition</strong><span>Evaluate the performance,<br />not the microphone.</span><small>Recording quality: diagnostic only</small>
+                <strong>Voice Selection</strong><small>Recording quality: diagnostic only</small>
               </button>
               <button className={`stage-card ${profile.stage === 'tts' ? 'chosen' : ''}`} onClick={() => setProfile({ ...profile, stage: 'tts' })}>
-                <span className="stage-icon">≋</span><strong>TTS evaluation</strong><span>Evaluate the complete<br />generated speech output.</span><small>Audio quality: included in score</small>
+                <strong>TTS evaluation</strong><small>Audio quality: included in score</small>
               </button>
             </div>
             <div className="field-row"><label>Who should be scored?<select value={profile.scope} disabled={!!busy} onChange={e => {
@@ -516,23 +517,23 @@ export function App() {
             }}>
               <option value="single">Single speaker</option><option value="agent">Agent only</option><option value="customer">Customer only</option><option value="both">Both, scored separately</option>
             </select></label><label>Language / accent<input value={profile.language} maxLength={500} disabled={!!busy} onChange={e => setProfile(withLanguageAccent(profile, e.target.value))} placeholder="auto, British English, Italian for Italy..." /></label></div>
-            <p className="hint" role="status">Accent fit: {profile.targetMarket?.trim() ? 'on - uses the language/accent target above.' : 'off - no accent target.'}</p>
+            <p className="hint" role="status">Accent fit: {profile.targetMarket?.trim() ? 'on' : 'off (auto language detection)'}</p>
             <div className="button-row"><button className="secondary" disabled={!!busy || !(savedClips?.length ?? records.length)} onClick={() => void action('Applying language hint', async () => applyLanguageToAll())}>Apply to all recordings</button></div>
-            <p className="hint">One field for the listening-language hint and target-accent score, in auditions and TTS. For example, British English guides listening and scores fit to that accent. Use auto for language detection without accent scoring. Include any acceptable regional variation; a broad or unclear target may remain unscored.</p>
-            <p className="hint">New recordings inherit this value. Optional per-input hints override listening context only, not the evaluation-wide accent target. Apply to all replaces those hints in this draft, including excluded inputs. Past evaluations are unchanged.</p>
             <label className="speaker-mode">Speaker selection<select value={profile.speakerMode ?? 'manual'} disabled={!!busy || savedClips !== undefined} onChange={e => setProfile({ ...profile, speakerMode: e.target.value === 'manual' ? 'manual' : 'automatic' })}>
               <option value="automatic">Automatic — infer roles from conversation content</option>
               <option value="manual">Advanced — manual speaker ranges / channels</option>
             </select></label>
             <p className="hint">{profile.speakerMode === 'automatic'
-              ? 'No timestamp selection or per-file confirmation. Judges listen to the conversation and assess only the requested role. Unclear roles are flagged, not guessed. This is not precise speaker separation.'
-              : 'Select and confirm target-only ranges or stereo channels for every included recording.'}</p>
-            <label>Target vocal style or test guide <span className="muted">(required)</span><textarea required rows={3} maxLength={1500} value={profile.target} disabled={!!busy} aria-invalid={!profile.target.trim()} aria-describedby="target-style-guidance" onChange={e => setProfile({ ...profile, target: e.target.value })} placeholder="For example: a warm, calm, conversational service-agent voice that is pleasant and effortless to listen to" /></label>
-            <p id="target-style-guidance" className="hint" role="status">{profile.target.trim() ? 'Describe the audible persona, tone and delivery to compare against. A guide does not guarantee assessable audio or clear speaker roles.' : 'Enter a target vocal style or test guide before starting the evaluation. Include audible tone and delivery criteria, not only task instructions.'}</p>
-            <p className="hint">With an explicit language/accent value, Target-market accent fit is equally weighted with other active dimensions. Judges assess audible fit, not nationality, ethnicity or native-speaker identity, and must not penalize the same mismatch in other dimensions.</p>
-            <p className="hint">Goal: find the best voice to listen to, not the best script. Judges assess vocal character, tone, emotion and listening comfort, not factual correctness, logic, helpfulness or task completion. Content is used only when needed to identify agent/customer roles.</p>
-            <details className="voice-evidence"><summary>What judges listen for · {RUBRIC_VERSION}</summary><ul>{dimensions.map(d => <li key={d}><strong>{labels[d]}:</strong> {voiceDimensionGuidance[d]}</li>)}</ul></details>
-            <p className="hint">Report language: English. The language/accent value does not override what is actually heard. Without a delivery target, style fit is not scored; with auto, accent fit is not scored. Language coverage is model-dependent; unsupported assessments are flagged, not ranked.</p>
+              ? 'Roles are inferred automatically; unclear roles are flagged.'
+              : 'Confirm speaker ranges or channels for each recording.'}</p>
+            <label><span>Target vocal style or test guide <span className="required-mark" aria-hidden="true">*</span></span><textarea required rows={2} maxLength={1500} value={profile.target} disabled={!!busy} aria-invalid={!profile.target.trim()} aria-describedby={!profile.target.trim() ? 'target-style-guidance' : undefined} onChange={e => setProfile({ ...profile, target: e.target.value })} placeholder="For example: warm, calm, conversational and effortless to listen to" /></label>
+            {!profile.target.trim() && <p id="target-style-guidance" className="hint" role="status">Add a vocal style or test guide to start.</p>}
+            <details className="voice-evidence"><summary>Evaluation guide · {RUBRIC_VERSION}</summary>
+              <p className="hint">Judges rate audible vocal delivery, not script quality or task completion. Reports are in English. Unsupported languages, unclear roles and insufficient evidence are flagged, not guessed.</p>
+              <p className="hint">Language / accent guides listening and, unless set to auto, activates an equally weighted accent-fit score. Specify acceptable regional variation. Judges assess audible fit, not identity or nationality, without double-penalizing accent differences.</p>
+              <p className="hint">New recordings inherit the language hint. Per-recording overrides affect listening only. Apply to all replaces hints for all draft inputs, including excluded ones; saved results stay unchanged.</p>
+              <ul>{dimensions.map(d => <li key={d}><strong>{labels[d]}:</strong> {voiceDimensionGuidance[d]}</li>)}</ul>
+            </details>
           </section>
           <section className="card"><SectionTitle step="02" title="Your judging panel" description="Each deployment listens independently using the same rubric." />
             {config && <AzureConnection config={config} busy={!!busy} onAction={action} onSaved={status => setConfig(previous => previous ? { ...previous, ...status } : previous)} />}
@@ -619,7 +620,7 @@ export function App() {
         <div className="page-title"><div><p className="eyebrow">EVIDENCE, NOT JUST A LEADERBOARD</p><h1>{job ? evaluationName(job) : 'Voice comparison'}</h1><p className="muted">Voice comparison · Different content and languages can affect results.</p>{job && <p className="hint">{new Date(job.createdAt).toLocaleString()} · ID: {job.id}</p>}</div>
           <div className="button-row">{job && <><button className="secondary" onClick={() => exportCsv(job)}>Export CSV</button><button className="secondary" onClick={() => exportVoiceEvidenceCsv(job)}>Export voice summaries</button><button className="secondary" onClick={() => download(`voice-evaluation-${job.id}.json`, JSON.stringify({ ...job, name: evaluationName(job), summary: summarize(job), voiceEvidence: summarizeVoiceEvidence(job), improvementGuidance: voiceDirectorBriefs(job) }, null, 2), 'application/json')}>Export JSON</button></>}</div></div>
         {!job ? <section className="card empty"><h2>No evaluation selected</h2><p>Start an evaluation or open a previous run from the sidebar.</p><button className="primary" onClick={beginNewEvaluation}>Set up evaluation</button></section> : <>
-          <div className="status-strip"><span className={`status-badge ${job.status}`}>{job.status}</span><strong>{job.profile.stage === 'audition' ? 'Human audition' : 'TTS evaluation'}</strong><span>{job.profile.scope} · {job.profile.speakerMode === 'automatic' ? 'Automatic roles' : 'Manual ranges'} · {job.judges.length} judges · {job.rubric}</span>
+          <div className="status-strip"><span className={`status-badge ${job.status}`}>{job.status}</span><strong>{job.profile.stage === 'audition' ? 'Voice Selection' : 'TTS evaluation'}</strong><span>{job.profile.scope} · {job.profile.speakerMode === 'automatic' ? 'Automatic roles' : 'Manual ranges'} · {job.judges.length} judges · {job.rubric}</span>
             <button className="secondary" title="Copy settings and available saved audio into a new editable evaluation" disabled={!!busy || !config} onClick={() => void action('Creating editable draft', () => reuseEvaluation(job))}>Edit</button>
             <button className="text-button danger" disabled={!!busy || job.status === 'running'} onClick={() => setConfirmDelete({ id: job.id, name: job.name, createdAt: job.createdAt, stage: job.profile.stage, status: job.status, clips: job.clips.length })}>Delete</button>
             <button className="text-button" disabled={!!busy} onClick={() => void action('Refreshing results', async () => { setJob(await api<Job>(`/api/jobs/${job.id}`)); await refresh(); })}>Refresh results</button>
@@ -705,7 +706,7 @@ export function App() {
   </div>;
 }
 function SectionTitle({ step, title, description }: { step: string; title: string; description: string }) {
-  return <div className="section-title"><span>{step}</span><div><h2>{title}</h2><p>{description}</p></div></div>;
+  return <div className="section-title"><span>{step}</span><h2>{title}</h2><p>{description}</p></div>;
 }
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
