@@ -121,7 +121,7 @@ export async function createApp(options: {
     const { clip, pcm } = z.object({
       clip: clipSchema,
       pcm: z.string().min(1).max(SAMPLE_RATE * 2 * MAX_SECONDS * 4 / 3 + 4)
-        .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+        .refine(value => value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value), 'Invalid base64 audio.'),
     }).parse(req.body);
     const bytes = Buffer.from(pcm, 'base64');
     const seconds = bytes.length / (SAMPLE_RATE * 2);

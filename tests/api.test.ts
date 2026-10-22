@@ -3,13 +3,47 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { profile, assessment, clip, job } from './fixtures.js';
 import { RUBRIC_VERSION, type AudioDiagnostics, type Job } from '../shared/domain.js';
 import { JudgeAudioError } from '../server/realtime.js';
 import { once } from 'node:events';
 import { createServer, request as httpRequest } from 'node:http';
+
+test('audio uploads accept maximum-length PCM and reject malformed base64 without overflowing', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-upload-'));
+  const server = createServer();
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const { app, errors, store } = await createApp({ dataDir: root, port: address.port });
+  app.use(errors); server.on('request', app);
+  const url = `http://127.0.0.1:${address.port}/api/clips`;
+  const upload = (pcm: string, end: number) => {
+    const input = clip({ end });
+    return fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clip: input, pcm }),
+    });
+  };
+  try {
+    const pcm = randomBytes(120 * 24000 * 2);
+    const response = await upload(pcm.toString('base64'), 120);
+    const saved = await response.json();
+    assert.equal(response.status, 201, JSON.stringify(saved));
+    assert.deepEqual(await store.pcm(saved.id), pcm);
+    for (const bytes of [24000, 24002, 24004]) {
+      const small = randomBytes(bytes);
+      assert.equal((await upload(small.toString('base64'), bytes / 48000)).status, 201);
+    }
+    for (const malformed of ['bad', 'AA=A', 'A===', 'AAAA=', 'AA==AAAA', 'AAAA\n', '____', `${pcm.toString('base64').slice(0, -1)}!`]) {
+      assert.equal((await upload(malformed, 120)).status, 400);
+    }
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('evaluation language defaults and market targets reach every judge and role in both stages and speaker modes', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-language-market-'));

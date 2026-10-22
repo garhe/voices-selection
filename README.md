@@ -24,6 +24,11 @@ On this Windows machine you can also run `.\Start-VoiceLab.ps1`. The launcher us
 
 The server listens only on loopback. Do not expose it as a network service: it is a single-user local application, not an authenticated multi-user service.
 
+If an older version reports "Maximum call stack size exceeded" while preparing
+an evaluation, update and restart the server before retrying. Audio-upload
+validation now supports the full 120-second window without overflowing the
+JavaScript call stack.
+
 ## Sharing and installing from GitHub
 
 The source is distributed through the **public** [garhe/voices-selection repository](https://github.com/garhe/voices-selection). Anyone can download it without a collaborator invitation. This is not a hosted website or a GitHub Pages app: each person runs their own local frontend and Node.js backend, with the same evaluation and reporting features.
