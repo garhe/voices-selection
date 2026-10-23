@@ -5,6 +5,7 @@ import { z, ZodError } from 'zod';
 import {
   clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, resolveLanguageHint, testNameSchema, evaluationName, retryableAudioIssue, SAMPLE_RATE, MAX_SECONDS, RUBRIC_VERSION,
   type Job, type Profile, type StoredClip, type TestQueueState,
+  rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, type Rubric,
 } from '../shared/domain.js';
 import { measurements, wav } from './audio.js';
 import { judgeAudio, JudgeAudioError, testRealtimeConnection } from './realtime.js';
@@ -52,6 +53,10 @@ export async function createApp(options: {
     }));
   }
   settingsSchema.parse(await store.settings());
+  const rubricLibrarySchema = z.array(rubricSchema).refine(items =>
+    new Set([DEFAULT_RUBRIC.id, ...items.map(item => item.id)]).size === items.length + 1, 'Rubric IDs must be unique and must not replace the built-in default.');
+  let rubrics = await store.exists('rubrics.json') ? rubricLibrarySchema.parse(await store.read('rubrics.json')) : [];
+  let rubricWrite = false;
   const savedJobs = await store.jobs();
   for (const job of savedJobs) {
     if (job.status === 'running') {
@@ -106,6 +111,7 @@ export async function createApp(options: {
   function newEvaluation(input: Pick<Job, 'name' | 'profile' | 'judges' | 'clips'>, enqueue: boolean): Job {
     return {
       ...input, id: randomUUID(), createdAt: new Date().toISOString(), status: enqueue ? 'queued' : 'running',
+      profile: { ...input.profile, rubric: input.profile.rubric ?? structuredClone(DEFAULT_RUBRIC) },
       rubric: RUBRIC_VERSION,
       results: input.clips.flatMap(clip => input.judges.map(judge => ({ clipId: clip.id, judgeId: judge.id, status: 'pending' }))),
     };
@@ -144,6 +150,55 @@ export async function createApp(options: {
   app.get('/api/config', async (_req, res) => res.json({
     ...await store.settings(), ...connection.status(), runtimeError, rubric: RUBRIC_VERSION,
   }));
+  app.get('/api/rubrics', (_req, res) => res.json([DEFAULT_RUBRIC, ...rubrics]));
+  app.post('/api/rubrics', async (req, res) => {
+    if (rubricWrite) { res.status(409).json({ error: 'A rubric is being saved. Try again shortly.' }); return; }
+    rubricWrite = true;
+    try {
+      const content = rubricContentSchema.parse(req.body);
+      if ([DEFAULT_RUBRIC, ...rubrics].some(item => item.name.toLowerCase() === content.name.toLowerCase())) {
+        res.status(409).json({ error: 'A rubric with this name already exists. Enter a different name for the new preset.' }); return;
+      }
+      const rubric = rubricSchema.parse({ ...content, id: randomUUID(), revision: 1 });
+      const next = [...rubrics, rubric];
+      await store.save('rubrics.json', next);
+      rubrics = next; res.status(201).json(rubric);
+    } finally { rubricWrite = false; }
+  });
+  app.put('/api/rubrics/:id', async (req, res) => {
+    if (req.params.id === DEFAULT_RUBRIC.id) { res.status(409).json({ error: 'The built-in default is read-only. Save an edited copy as a new preset.' }); return; }
+    const id = uuid.parse(req.params.id);
+    if (rubricWrite) { res.status(409).json({ error: 'A rubric is being saved. Try again shortly.' }); return; }
+    rubricWrite = true;
+    try {
+      const input = rubricContentSchema.extend({ revision: z.number().int().positive() }).parse(req.body);
+      const previous = rubrics.find(item => item.id === id);
+      if (!previous) { res.status(404).json({ error: 'This rubric preset no longer exists. Refresh the presets.' }); return; }
+      if (input.revision !== previous.revision) { res.status(409).json({ error: 'This rubric was changed in another window. Refresh the presets before saving again.' }); return; }
+      if ([DEFAULT_RUBRIC, ...rubrics].some(item => item.id !== id && item.name.toLowerCase() === input.name.toLowerCase())) {
+        res.status(409).json({ error: 'A rubric with this name already exists. Enter a different rubric name.' }); return;
+      }
+      const rubric: Rubric = rubricSchema.parse({ ...input, id, revision: previous.revision + 1 });
+      const next = rubrics.map(item => item.id === id ? rubric : item);
+      await store.save('rubrics.json', next);
+      rubrics = next; res.json(rubric);
+    } finally { rubricWrite = false; }
+  });
+  app.delete('/api/rubrics/:id', async (req, res) => {
+    if (req.params.id === DEFAULT_RUBRIC.id) { res.status(409).json({ error: 'The built-in default cannot be deleted.' }); return; }
+    const id = uuid.parse(req.params.id);
+    const { revision } = z.object({ revision: z.number().int().positive() }).strict().parse(req.body);
+    if (rubricWrite) { res.status(409).json({ error: 'A rubric is being saved. Try again shortly.' }); return; }
+    rubricWrite = true;
+    try {
+      const previous = rubrics.find(item => item.id === id);
+      if (!previous) { res.status(404).json({ error: 'This rubric preset no longer exists. Refresh the presets.' }); return; }
+      if (previous.revision !== revision) { res.status(409).json({ error: 'This rubric was changed in another window. Refresh the presets before deleting it.' }); return; }
+      const next = rubrics.filter(item => item.id !== id);
+      await store.save('rubrics.json', next);
+      rubrics = next; res.json({ deleted: id });
+    } finally { rubricWrite = false; }
+  });
   app.put('/api/connection', async (req, res) => {
     if (connectionWrite) { res.status(409).json({ error: 'Connection settings are already being saved. Try again shortly.' }); return; }
     connectionWrite = true;

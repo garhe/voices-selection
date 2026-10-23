@@ -11,7 +11,42 @@ import { readFileSync } from 'node:fs';
 import { DatePicker, calendarDateKey, calendarDays, parseCalendarDate, shiftCalendarMonth } from '../src/DatePicker.js';
 import { ThemePicker } from '../src/ThemePicker.js';
 import { App } from '../src/App.js';
+import { RubricEditor } from '../src/RubricEditor.js';
+import { DEFAULT_RUBRIC } from '../shared/domain.js';
+import { profile } from './fixtures.js';
 import { DEFAULT_THEME_COLOR, themeFamilies, themePalette, themePresets, validThemeColor } from '../src/theme.js';
+
+test('rubric editor exposes saved presets, seven editable dimensions, stage weights and single-speaker defaults', () => {
+  const html = renderToStaticMarkup(createElement(RubricEditor, {
+    profile, presets: [DEFAULT_RUBRIC], busy: false,
+    onChange: () => {}, onSelect: () => {}, onSave: () => {}, onDelete: () => {}, onRefresh: () => {},
+  }));
+  assert.match(html, /Evaluation guide \/ rubric/);
+  assert.match(html, /built-in default/);
+  assert.match(html, /Save as new preset/); assert.match(html, /Save changes/);
+  assert.match(html, /Single-speaker default test guide/);
+  assert.match(html, /Conversation default test guide/);
+  assert.equal((html.match(/<fieldset/g) ?? []).length, 7);
+  assert.equal((html.match(/class="rubric-title-button"/g) ?? []).length, 7);
+  assert.match(html, /aria-label="Edit Naturalness dimension name"/);
+  assert.match(html, /aria-label="Edit Audio quality dimension name"/);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 21);
+  assert.doesNotMatch(html, /Display name|type="number"/);
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.rubric-dimension legend\{[^}]*font-size:1\.125rem;[^}]*font-weight:600/);
+  assert.match(css, /\.rubric-dimension legend input:not\(\[type=checkbox\]\)\{[^}]*font:inherit/);
+  assert.equal((html.match(/Voice Selection inclusion/g) ?? []).length, 7);
+  assert.equal((html.match(/TTS inclusion/g) ?? []).length, 7);
+  assert.match(html, /Checked dimensions contribute equally/);
+  assert.match(html, /Audio quality is always requested/);
+});
+
+test('judge numbers, fields and remove buttons share a bottom edge and control height', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.setup-grid \.judge\{align-items:flex-end\}/);
+  assert.match(css, /\.judge>\.judge-avatar,\.judge>\.icon-button,\.judge-fields input\{height:40px;min-height:40px\}/);
+  assert.match(css, /\.judge>\.judge-avatar,\.judge>\.icon-button\{flex:0 0 36px;width:36px\}/);
+});
 
 test('shared surfaces keep opaque fallbacks, readable headers and flat native checkboxes', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');

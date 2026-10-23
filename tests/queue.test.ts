@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { createApp } from '../server/app.js';
 import { assessment, clip, profile, job as fixtureJob } from './fixtures.js';
 import type { BulkTestResult } from '../shared/history.js';
-import { RUBRIC_VERSION, type Job, type TestQueueState } from '../shared/domain.js';
+import { RUBRIC_VERSION, DEFAULT_RUBRIC, type Job, type TestQueueState } from '../shared/domain.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TestQueue } from '../src/TestQueue.js';
@@ -212,7 +212,7 @@ test('concurrent queue admissions persist before execution and a dispatch save f
       const copy = await backend.store.read<Job>(path.join('jobs', `${result.succeeded[0].newId}.json`));
       assert.notEqual(copy.id, source.id); assert.equal(copy.name, source.name); assert.equal(copy.status, 'queued');
       assert.equal(copy.rubric, RUBRIC_VERSION);
-      assert.deepEqual(copy.profile, source.profile); assert.deepEqual(copy.judges, source.judges);
+      assert.deepEqual(copy.profile, { ...source.profile, rubric: DEFAULT_RUBRIC }); assert.deepEqual(copy.judges, source.judges);
       assert.deepEqual(copy.clips, source.clips); assert.deepEqual(copy.voiceLabels, source.voiceLabels);
       assert.ok(copy.results.every(result => result.status === 'pending' && !result.assessment));
       assert.equal(JSON.stringify(await backend.store.read<Job>(path.join('jobs', `${source.id}.json`))), original);

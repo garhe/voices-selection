@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   type Dimension, type Job, type Profile, type Settings, type Summary, type ConnectionStatus, type ConnectionTest, type EvidenceNote, type VoiceEvidence, type DraftClip, type StoredClip, type TestQueueState,
-  dimensions, labels, voiceDimensionGuidance, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, retryableAudioIssue, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, languageHintSchema, resolveLanguageHint, rolesForScope,
+  dimensions, dimensionLabel, dimensionWeight, profileRubric, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, retryableAudioIssue, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, languageHintSchema, resolveLanguageHint, rolesForScope,
 } from '../shared/domain';
 import { automaticRegions, base64, browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
-import { applyLanguageHint, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE } from './readiness';
+import { applyLanguageHint, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric, DEFAULT_TEST_GUIDE } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
 import { canManageTest, testHistory, testMetadataSchema, testNameMetadata, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
 import { TestLibrary, TestMetadataEditor, type ReportKind } from './TestLibrary';
 import { TestQueue } from './TestQueue';
 import { ConfirmationDialog } from './ConfirmationDialog';
 import { ThemePicker } from './ThemePicker';
+import { RubricEditor } from './RubricEditor';
 
 type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string };
 type History = TestHistory;
@@ -51,12 +52,16 @@ function csvCell(value: unknown) {
   if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
   return `"${text.replaceAll('"', '""')}"`;
 }
+const rubricColumns = ['rubric_preset', 'rubric_revision', 'rubric_snapshot'];
+function rubricCells(profile: Profile) {
+  return [profile.rubric?.name, profile.rubric?.revision, profile.rubric && JSON.stringify(profile.rubric)];
+}
 function exportCsv(job: Job) {
   const rows: unknown[][] = [[
     'test_name', 'evaluation_id', 'created_at', 'voice', 'file', 'role', 'start_seconds', 'end_seconds', 'channel', 'judge', 'deployment', 'reported_model',
     'stage', 'speaker_mode', 'rubric', 'language_hint', 'input_language_hint', 'target_market', 'status', 'response_format', 'language', 'language_supported', 'assessable', 'preference_score',
     'role_attribution_status', 'role_attribution_evidence',
-    ...dimensions, 'error', 'observations', 'limitations', 'dimension_reasons', 'audio_diagnostics', 'previous_evaluations',
+    ...dimensions, 'error', 'observations', 'limitations', 'dimension_reasons', 'audio_diagnostics', 'previous_evaluations', ...rubricColumns,
   ]];
   for (const r of job.results) {
     const clip = job.clips.find(c => c.id === r.clipId)!;
@@ -68,7 +73,7 @@ function exportCsv(job: Job) {
       r.assessment?.speakerAttribution?.status, r.assessment?.speakerAttribution?.evidence,
       ...dimensions.map(d => r.assessment?.scores[d]), r.error,
       r.assessment?.observations.join(' | '), r.assessment?.limitations.join(' | '), JSON.stringify(r.assessment?.reasons),
-      JSON.stringify(r.audioDiagnostics), JSON.stringify(r.previousEvaluations),
+      JSON.stringify(r.audioDiagnostics), JSON.stringify(r.previousEvaluations), ...rubricCells(job.profile),
     ]);
   }
   download(`voice-assessments-${job.id}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
@@ -76,13 +81,13 @@ function exportCsv(job: Job) {
 function exportVoiceEvidenceCsv(job: Job) {
   const rows: unknown[][] = [[
     'test_name', 'evaluation_id', 'rubric', 'language_hint', 'target_market', 'voice', 'role', 'judge', 'deployment', 'full_panel_eligible_files', 'total_files',
-    'judge_scored_files', 'section', 'dimension', 'dimension_score', 'diagnostic_only', 'recording_count', 'files', 'comment',
+    'judge_scored_files', 'section', 'dimension', 'dimension_score', 'diagnostic_only', 'recording_count', 'files', 'comment', 'dimension_label', ...rubricColumns,
   ]];
   for (const voice of summarizeVoiceEvidence(job)) for (const evidence of voice.judges) {
     const judge = job.judges.find(j => j.id === evidence.judgeId)!;
     const row = (section: string, note?: EvidenceNote, dimension?: Dimension, value?: number | null, diagnostic?: boolean) => rows.push([
       evaluationName(job), job.id, job.rubric, job.profile.language, job.profile.targetMarket, voice.voice, voice.role, judge.name, judge.deployment, voice.eligibleFiles, voice.files,
-      evidence.scoredFiles, section, dimension, value, diagnostic, note?.files.length, note?.files.join(' | '), note?.text,
+      evidence.scoredFiles, section, dimension, value, diagnostic, note?.files.length, note?.files.join(' | '), note?.text, dimension && dimensionLabel(job.profile, dimension), ...rubricCells(job.profile),
     ]);
     row('coverage');
     for (const section of ['gaps', 'observations', 'limitations'] as const)
@@ -102,7 +107,7 @@ function exportVoiceMatrixCsv(job: Job) {
     `${note.text}\nSource recordings (${note.files.length}): ${note.files.join(' | ')}`).join('\n\n') : 'None recorded.';
   const rows: unknown[][] = [[
     'test_name', 'evaluation_id', 'rubric', 'language_hint', 'target_market', 'voice', 'role', 'panel_preference_score', 'panel_eligible_files', 'total_files',
-    ...job.judges.map(judge => `${judge.name} (${judge.deployment})`),
+    ...job.judges.map(judge => `${judge.name} (${judge.deployment})`), ...rubricColumns,
   ]];
   for (const voice of summarizeVoiceEvidence(job)) rows.push([
     evaluationName(job), job.id, job.rubric, job.profile.language, job.profile.targetMarket, voice.voice, voice.role, voice.score, voice.eligibleFiles, voice.files,
@@ -113,9 +118,9 @@ function exportVoiceMatrixCsv(job: Job) {
       `LIMITATIONS:\n${notes(judge.limitations)}`,
       `SCORING GAPS:\n${notes(judge.gaps)}`,
       `DIMENSION RATINGS & ORIGINAL REASONS:\n${judge.dimensions.map(d =>
-        `${labels[d.dimension]}: ${score(d.score)}${d.diagnostic ? ' (diagnostic only; excluded from preference)' : ''}\n${notes(d.reasons)}`).join('\n\n')}`,
+        `${dimensionLabel(job.profile, d.dimension)}: ${score(d.score)}${d.diagnostic ? ' (diagnostic only; excluded from preference)' : ''}\n${notes(d.reasons)}`).join('\n\n')}`,
       'Saved evidence only. Scores use eligible recordings; comments may also come from excluded recordings. No new verdict or pros/cons classification.',
-    ].join('\n\n')),
+    ].join('\n\n')), ...rubricCells(job.profile),
   ]);
   download(`voice-judge-matrix-${job.id}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
 }
@@ -137,8 +142,8 @@ function VoiceJudgeMatrix({ job, voices }: { job: Job; voices: VoiceEvidence[] }
             {judge.observations.length > 2 && <details><summary>More overall comments ({judge.observations.length - 2})</summary><EvidenceList notes={judge.observations.slice(2)} /></details>}
             <details><summary>Limitations ({judge.limitations.length})</summary>{judge.limitations.length ? <EvidenceList notes={judge.limitations} /> : <p>No limitations recorded.</p>}</details>
             <details open={judge.gaps.length > 0}><summary>Scoring gaps ({judge.gaps.length})</summary>{judge.gaps.length ? <EvidenceList notes={judge.gaps} /> : <p>No scoring gaps reported.</p>}</details>
-            <h3>Dimension ratings</h3><ul className="matrix-ratings">{judge.dimensions.map(d => <li key={d.dimension}>{labels[d.dimension]}: <strong>{score(d.score)}</strong>{d.diagnostic && <small>Diagnostic only; excluded from preference</small>}</li>)}</ul>
-            <details><summary>Why these ratings</summary>{judge.dimensions.map(d => <div key={d.dimension}><h4>{labels[d.dimension]} · {score(d.score)}{d.diagnostic && ' (diagnostic only)'}</h4>{d.reasons.length ? <EvidenceList notes={d.reasons} /> : <p>No scored evidence available; check scoring gaps.</p>}</div>)}</details>
+            <h3>Dimension ratings</h3><ul className="matrix-ratings">{judge.dimensions.map(d => <li key={d.dimension}>{dimensionLabel(job.profile, d.dimension)}: <strong>{score(d.score)}</strong>{d.diagnostic && <small>Diagnostic only; excluded from preference</small>}</li>)}</ul>
+            <details><summary>Why these ratings</summary>{judge.dimensions.map(d => <div key={d.dimension}><h4>{dimensionLabel(job.profile, d.dimension)} · {score(d.score)}{d.diagnostic && ' (diagnostic only)'}</h4>{d.reasons.length ? <EvidenceList notes={d.reasons} /> : <p>No scored evidence available; check scoring gaps.</p>}</div>)}</details>
           </td>)}
         </tr>)}
           {!voices.length && <tr><td colSpan={job.judges.length + 2}>No recordings match this filter yet. Language filtering requires agreement across the full judge panel.</td></tr>}
@@ -151,7 +156,7 @@ function exportCoachingCsv(job: Job) {
   const rows: unknown[][] = [[
     'test_name', 'rubric', 'language_hint', 'voice', 'role', 'director_summary', 'keep_doing', 'delivery_target', 'target_market',
     'focus', 'performance_direction', 'practice_steps', 'listening_check', 'next_take_plan', 'before_you_send', 'brief_notes',
-    'recording_cases', 'saved_recording_feedback',
+    'recording_cases', 'saved_recording_feedback', ...rubricColumns,
   ]];
   for (const voice of voiceDirectorBriefs(job)) {
     const common = [
@@ -161,7 +166,7 @@ function exportCoachingCsv(job: Job) {
       ...common, focus?.title, focus?.direction, focus?.steps.join('\n'), focus?.check,
       voice.takePlan.join('\n'), voice.checklist.join('\n'), voice.notes.join('\n'),
       focus?.cases.map(item => `${item.recording} (${item.start}-${item.end}s)\nFind: ${item.cue}\nHeard: ${item.observation}\nDo: ${item.direction}\nPass check: ${item.check}`).join('\n\n'),
-      focus?.feedback.map(item => `${item.recording} (${item.start}-${item.end}s): ${item.observation}`).join('\n'),
+      focus?.feedback.map(item => `${item.recording} (${item.start}-${item.end}s): ${item.observation}`).join('\n'), ...rubricCells(job.profile),
     ]);
   }
   download(`voice-improvement-guidance-${job.id}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
@@ -292,6 +297,7 @@ export function App() {
   const [testName, setTestName] = useState('');
   const [profile, setProfile] = useState<Profile>({ stage: 'audition', scope: 'agent', speakerMode: 'automatic', target: DEFAULT_TEST_GUIDE, language: 'auto', targetMarket: '' });
   const [config, setConfig] = useState<Config>();
+  const [rubrics, setRubrics] = useState<Rubric[]>();
   const [records, setRecords] = useState<Recording[]>([]);
   const [savedClips, setSavedClips] = useState<DraftClip[]>();
   const [draftSource, setDraftSource] = useState<string>();
@@ -332,8 +338,8 @@ export function App() {
     finally { busyRef.current = false; setBusy(''); }
   }
   async function refresh() {
-    const [configuration, list, queueState] = await Promise.all([api<Config>('/api/config'), loadHistory(), api<TestQueueState>('/api/queue')]);
-    setConfig(configuration); setHistory(list); setQueue(queueState);
+    const [configuration, list, queueState, presets] = await Promise.all([api<Config>('/api/config'), loadHistory(), api<TestQueueState>('/api/queue'), api<Rubric[]>('/api/rubrics')]);
+    setConfig(configuration); setHistory(list); setQueue(queueState); setRubrics(presets);
     if (configuration.runtimeError) setNotice(configuration.runtimeError);
   }
   useEffect(() => {
@@ -497,7 +503,7 @@ export function App() {
   }
   async function reuseEvaluation(source: Job) {
     const draft = await api<{ job: Job; clips: StoredClip[]; missing: number }>(`/api/jobs/${source.id}/draft`);
-    setTestName(evaluationName(draft.job)); setProfile(withLanguageAccent(draft.job.profile));
+    setTestName(evaluationName(draft.job)); setProfile(withRubric(withLanguageAccent(draft.job.profile), profileRubric(draft.job.profile)));
     setConfig(previous => previous ? { ...previous, judges: draft.job.judges.map(j => ({ ...j })) } : previous);
     setRecords([]); setSelected(undefined); setSavedClips(draft.clips.map(c => ({ ...c, include: true })));
     setDraftSource(evaluationName(draft.job)); setConsent(false); setTab('setup');
@@ -669,19 +675,19 @@ export function App() {
           <section className="card"><SectionTitle step="01" title="Choose your evaluation" description="Different stages deserve different criteria." />
             <div className="stage-options">
               <button className={`stage-card ${profile.stage === 'audition' ? 'chosen' : ''}`} onClick={() => setProfile({ ...profile, stage: 'audition' })}>
-                <strong>Voice Selection</strong><small>Recording quality: diagnostic only</small>
+                <strong>Voice Selection</strong><small>Audio quality: {dimensionWeight({ ...profile, stage: 'audition' }, 'audioQuality') > 0 ? 'included in score' : 'diagnostic only'}</small>
               </button>
               <button className={`stage-card ${profile.stage === 'tts' ? 'chosen' : ''}`} onClick={() => setProfile({ ...profile, stage: 'tts' })}>
-                <strong>TTS evaluation</strong><small>Audio quality: included in score</small>
+                <strong>TTS evaluation</strong><small>Audio quality: {dimensionWeight({ ...profile, stage: 'tts' }, 'audioQuality') > 0 ? 'included in score' : 'diagnostic only'}</small>
               </button>
             </div>
             <div className="field-row"><label>Who should be scored?<select value={profile.scope} disabled={!!busy} onChange={e => {
-              const scope = e.target.value as Profile['scope']; setProfile({ ...profile, scope });
+              const scope = e.target.value as Profile['scope']; setProfile(withSpeakerScope(profile, scope));
               setRecords(old => old.map(r => ({ ...r, regions: r.duration ? defaultRegions(scope, r.duration) : [] })));
             }}>
               <option value="single">Single speaker</option><option value="agent">Agent only</option><option value="customer">Customer only</option><option value="both">Both, scored separately</option>
             </select></label><label>Language / accent<input value={profile.language} maxLength={500} disabled={!!busy} onChange={e => setProfile(withLanguageAccent(profile, e.target.value))} placeholder="auto, British English, Italian for Italy..." /></label></div>
-            <p className="hint" role="status">Language / accent is filled from a single locale code in the test name; you can override it. Accent fit: {profile.targetMarket?.trim() ? 'on' : 'off (auto language detection)'}</p>
+            <p className="hint" role="status">Language / accent is filled from a single locale code in the test name; you can override it. Accent fit: {activeDimensions(profile).includes('accentFit') ? `on (weight ${dimensionWeight(profile, 'accentFit')})` : 'off (no accent target or excluded by rubric)'}</p>
             <div className="button-row"><button className="secondary" disabled={!!busy || !(savedClips?.length ?? records.length)} onClick={() => void action('Applying language hint', async () => applyLanguageToAll())}>Apply to all recordings</button></div>
             <label className="speaker-mode">Speaker selection<select value={profile.speakerMode ?? 'manual'} disabled={!!busy || savedClips !== undefined} onChange={e => setProfile({ ...profile, speakerMode: e.target.value === 'manual' ? 'manual' : 'automatic' })}>
               <option value="automatic">Automatic — infer roles from conversation content</option>
@@ -692,12 +698,27 @@ export function App() {
               : 'Confirm speaker ranges or channels for each recording.'}</p>
             <label><span>Target vocal style or test guide <span className="required-mark" aria-hidden="true">*</span></span><textarea required rows={2} maxLength={1500} value={profile.target} disabled={!!busy} aria-invalid={!profile.target.trim()} aria-describedby={!profile.target.trim() ? 'target-style-guidance' : undefined} onChange={e => setProfile({ ...profile, target: e.target.value })} placeholder="For example: warm, calm, conversational and effortless to listen to" /></label>
             {!profile.target.trim() && <p id="target-style-guidance" className="hint" role="status">Add a vocal style or test guide to start.</p>}
-            <details className="voice-evidence"><summary>Evaluation guide · {RUBRIC_VERSION}</summary>
-              <p className="hint">Judges rate audible vocal delivery, not script quality or task completion. Reports are in English. Unsupported languages, unclear roles and insufficient evidence are flagged, not guessed.</p>
-              <p className="hint">Language / accent guides listening and, unless set to auto, activates an equally weighted accent-fit score. Specify acceptable regional variation. Judges assess audible fit, not identity or nationality, without double-penalizing accent differences.</p>
-              <p className="hint">New recordings inherit the language hint. Per-recording overrides affect listening only. Apply to all replaces hints for all draft inputs, including excluded ones; saved results stay unchanged.</p>
-              <ul>{dimensions.map(d => <li key={d}><strong>{labels[d]}:</strong> {voiceDimensionGuidance[d]}</li>)}</ul>
-            </details>
+            <RubricEditor profile={profile} presets={rubrics} busy={!!busy}
+              onChange={rubric => setProfile(previous => withRubric(previous, rubric))}
+              onSelect={rubric => setProfile(previous => withRubric(previous, rubric))}
+              onRefresh={() => void action('Refreshing rubrics', async () => setRubrics(await api<Rubric[]>('/api/rubrics')))}
+              onSave={(rubric, copy) => void action('Saving rubric', async () => {
+                const { id, revision, ...content } = rubric;
+                const saved = await api<Rubric>(copy ? '/api/rubrics' : `/api/rubrics/${id}`, copy ? content : { ...content, revision }, copy ? 'POST' : 'PUT');
+                setRubrics(previous => [...(previous ?? []).filter(item => item.id !== saved.id), saved]);
+                setProfile(previous => withRubric(previous, saved));
+                setNotice('Rubric preset saved. Existing and queued tests keep their original rubric snapshots.');
+              })}
+              onDelete={rubric => {
+                setNotice('');
+                setConfirmAction({ title: `Delete rubric preset "${rubric.name}"?`,
+                  description: 'This removes the saved preset from the library. Existing and queued tests keep their rubric snapshots. Your current draft keeps its snapshot and can be saved as a new preset.',
+                  label: 'Delete preset', status: 'Deleting rubric', run: async () => {
+                    await api(`/api/rubrics/${rubric.id}`, { revision: rubric.revision }, 'DELETE');
+                    setRubrics(previous => previous?.filter(item => item.id !== rubric.id));
+                    setNotice('Rubric preset deleted. Evaluation snapshots are unchanged.');
+                  } });
+              }} />
           </section>
           <section className="card"><SectionTitle step="02" title="Your judging panel" description="Each deployment listens independently using the same rubric." />
             {config && <AzureConnection config={config} busy={!!busy} onAction={action} onSaved={status => setConfig(previous => previous ? { ...previous, ...status } : previous)} />}
@@ -814,11 +835,15 @@ export function App() {
             : <div className="callout"><strong>Earlier rubric · {job.rubric}:</strong> these saved scores and comments have not been re-evaluated under the {RUBRIC_VERSION} voice-persona criteria. Use Edit inputs to reuse the saved audio in a new evaluation. Retrying across rubric versions is blocked to avoid mixing judgments.</div>}
           <p className="hint">Evaluation language hint: {job.profile.language}. Per-input hints are shown with each recording. Target market/accent: {job.profile.targetMarket || 'Not supplied; accent fit is not scored.'}</p>
           <div className="progress-track"><div style={{ width: `${finished / job.results.length * 100}%` }} /></div>
-          <div className="metrics"><Metric label="Judge assessments finished" value={`${finished} / ${job.results.length}`} /><Metric label="Failures" value={String(failures)} /><Metric label="Unassessable / partial" value={String(needsReview)} /><Metric label="Recording quality" value={job.profile.stage === 'audition' ? 'Diagnostic only' : 'Included'} /></div>
-          <div className="callout">Scores are uncalibrated AI opinions on a 1–5 scale, not MOS. Consensus requires every configured judge. In automatic mode, windows unanimously marked role not present are excluded and counted; ambiguous roles, disagreements and failures prevent the recording from entering the preference average. The overall preference score equally weights active dimensions; it is not a probability or proof of voice superiority.</div>
+          {job.profile.rubric && <details className="card voice-evidence"><summary>Saved rubric snapshot · {job.profile.rubric.name} · revision {job.profile.rubric.revision}</summary>
+            <p>{job.profile.rubric.instructions}</p><p className="hint">This is the exact rubric saved with this test, independent of later preset edits. Preference uses the active dimensions and their {job.profile.stage === 'audition' ? 'Voice Selection' : 'TTS'} weights below.</p>
+            <ul>{profileRubric(job.profile).dimensions.map(d => <li key={d.id}><strong>{d.label}</strong> · weight {dimensionWeight(job.profile, d.id)}{!activeDimensions(job.profile).includes(d.id) && ' (excluded from preference)'}: {d.description}</li>)}</ul>
+          </details>}
+          <div className="metrics"><Metric label="Judge assessments finished" value={`${finished} / ${job.results.length}`} /><Metric label="Failures" value={String(failures)} /><Metric label="Unassessable / partial" value={String(needsReview)} /><Metric label="Recording quality" value={activeDimensions(job.profile).includes('audioQuality') ? 'Included' : 'Diagnostic only'} /></div>
+          <div className="callout">Scores are uncalibrated AI opinions on a 1–5 scale, not MOS. Consensus requires every configured judge. In automatic mode, windows unanimously marked role not present are excluded and counted; ambiguous roles, disagreements and failures prevent the recording from entering the preference average. The overall preference score uses the rubric weights for active dimensions; it is not a probability or proof of voice superiority.</div>
           <section className="card"><div className="section-with-action"><div><h2>Recording-set comparison</h2><p className="hint">Duration-weighted regions → one recording score → equal-weight recording average. Agent and customer stay separate.</p></div>
             <label>Language<select value={languageFilter} onChange={e => setLanguageFilter(e.target.value)}><option value="all">All languages (not controlled)</option>{languages.map(l => <option key={l} value={l}>{l}</option>)}</select></label></div>
-            <div className="table-scroll"><table><thead><tr><th>Voice / role</th><th>Eligible files</th><th>Preference</th>{activeDimensions(job.profile).map(d => <th key={d}>{labels[d]}</th>)}<th>Judge spread</th></tr></thead><tbody>
+            <div className="table-scroll"><table><thead><tr><th>Voice / role</th><th>Eligible files</th><th>Preference</th>{activeDimensions(job.profile).map(d => <th key={d}>{dimensionLabel(job.profile, d)}</th>)}<th>Judge spread</th></tr></thead><tbody>
               {summary.map(s => <SummaryRow key={JSON.stringify([s.voice, s.role])} summary={s} dimensions={activeDimensions(job.profile)} />)}
               {!summary.length && <tr><td colSpan={10}>No recordings match this filter yet. Language filtering requires agreement across the full judge panel.</td></tr>}
             </tbody></table></div>
@@ -838,7 +863,7 @@ export function App() {
                   {evidence.gaps.length ? <EvidenceList notes={evidence.gaps} /> : <p>No scoring gaps reported.</p>}
                   <details><summary>Reported observations ({evidence.observations.length} distinct comments)</summary>{evidence.observations.length ? <EvidenceList notes={evidence.observations} /> : <p>No observations recorded.</p>}</details>
                   <details><summary>Reported limitations ({evidence.limitations.length} distinct comments)</summary>{evidence.limitations.length ? <EvidenceList notes={evidence.limitations} /> : <p>No limitations recorded.</p>}</details>
-                  <details><summary>Dimension evidence</summary>{evidence.dimensions.map(d => <div key={d.dimension}><h4>{labels[d.dimension]} · {score(d.score)}{d.diagnostic ? ' (diagnostic only)' : ''}</h4>{d.reasons.length ? <EvidenceList notes={d.reasons} /> : <p>No scored evidence available.</p>}</div>)}</details>
+                  <details><summary>Dimension evidence</summary>{evidence.dimensions.map(d => <div key={d.dimension}><h4>{dimensionLabel(job.profile, d.dimension)} · {score(d.score)}{d.diagnostic ? ' (diagnostic only)' : ''}</h4>{d.reasons.length ? <EvidenceList notes={d.reasons} /> : <p>No scored evidence available.</p>}</div>)}</details>
                 </article>;
               })}
             </details>)}
@@ -869,7 +894,7 @@ export function App() {
                   </details>}
                   {r.status === 'completed' && assessmentGaps(r, job.profile, c.role).length > 0 && <div className="callout"><strong>Why this assessment cannot supply a preference score</strong><ul>{assessmentGaps(r, job.profile, c.role).map(gap => <li key={gap}>{gap}</li>)}</ul></div>}
                   {r.assessment && <>{r.assessment.speakerAttribution && <div className="callout"><strong>Role: {r.assessment.speakerAttribution.role} · {r.assessment.speakerAttribution.status}</strong><p>{r.assessment.speakerAttribution.evidence}</p></div>}<p className="hint">{r.assessment.language} · {r.assessment.languageSupported ? 'Model reports language assessable (not independently validated)' : 'Language not reliably supported'} · preference: {score(eligibleScore(r.assessment, job.profile))}</p>
-                    <dl>{dimensions.map(d => <div key={d}><dt>{labels[d]} {d === 'audioQuality' && job.profile.stage === 'audition' && <small>(diagnostic)</small>}<b>{score(r.assessment!.scores[d])}</b></dt><dd>{r.assessment!.reasons[d] ?? (d === 'accentFit' ? 'Not assessed in this saved evaluation.' : '')}</dd></div>)}</dl>
+                    <dl>{dimensions.map(d => <div key={d}><dt>{dimensionLabel(job.profile, d)} {d === 'audioQuality' && !activeDimensions(job.profile).includes(d) && <small>(diagnostic)</small>}<b>{score(r.assessment!.scores[d])}</b></dt><dd>{r.assessment!.reasons[d] ?? (d === 'accentFit' ? 'Not assessed in this saved evaluation.' : '')}</dd></div>)}</dl>
                     {!!r.assessment.observations.length && <><h4>Observations</h4><ul>{r.assessment.observations.map((o, i) => <li key={i}>{o}</li>)}</ul></>}
                     {!!r.assessment.limitations.length && <><h4>Limitations</h4><ul className="limitations">{r.assessment.limitations.map((o, i) => <li key={i}>{o}</li>)}</ul></>}</>}
                 </article>;

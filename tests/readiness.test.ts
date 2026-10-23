@@ -1,12 +1,50 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { applyLanguageHint, evaluationBlockers, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE } from '../src/readiness.js';
-import { activeDimensions, profileSchema } from '../shared/domain.js';
+import { applyLanguageHint, evaluationBlockers, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
+import { activeDimensions, eligibleScore, profileSchema, DEFAULT_RUBRIC } from '../shared/domain.js';
 import type { Region } from '../src/audio.js';
-import { clip, profile as baseProfile } from './fixtures.js';
+import { assessment, clip, profile as baseProfile } from './fixtures.js';
 
 const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
+
+test('editable rubric drafts use yes/no equal contributions without changing saved source weights', () => {
+  const saved = structuredClone(DEFAULT_RUBRIC);
+  saved.dimensions.forEach(d => { d.enabled = ['naturalness', 'pace'].includes(d.id); });
+  saved.dimensions[0].weights = { audition: 9, tts: 1.5 };
+  const snapshot = JSON.stringify(saved);
+  const draft = withRubric(profile, saved);
+  assert.ok(draft.rubric!.dimensions.every(d => [0, 1].includes(d.weights.audition) && [0, 1].includes(d.weights.tts)));
+  assert.equal(draft.rubric!.dimensions.find(d => d.id === 'audioQuality')!.weights.audition, 0);
+  assert.equal(draft.rubric!.dimensions[1].enabled, false);
+  const value = assessment(1); value.scores.pace = 5;
+  assert.equal(eligibleScore(value, draft), 3);
+  assert.equal(eligibleScore(value, { ...profile, rubric: saved }), 1.4);
+  assert.equal(JSON.stringify(saved), snapshot);
+});
+
+test('single-speaker scope automatically gets its own default guide without overwriting custom guidance', () => {
+  const agent = { ...profile, scope: 'agent' as const, target: DEFAULT_TEST_GUIDE };
+  const single = withSpeakerScope(agent, 'single');
+  assert.equal(single.target, SINGLE_SPEAKER_TEST_GUIDE);
+  assert.match(single.target, /one speaker/);
+  assert.doesNotMatch(single.target, /customer|only the agent/);
+  assert.equal(withSpeakerScope(single, 'agent').target, DEFAULT_TEST_GUIDE);
+  assert.equal(withSpeakerScope({ ...single, target: 'Keep a restrained, warm tone.' }, 'agent').target, 'Keep a restrained, warm tone.');
+  assert.equal(agent.target, DEFAULT_TEST_GUIDE);
+});
+
+test('switching and editing rubrics updates only default guides and preserves the matching speaker scope', () => {
+  const rubric = structuredClone(DEFAULT_RUBRIC);
+  rubric.testGuides = { conversation: 'Custom conversation style.', single: 'Custom single-speaker style.' };
+  const single = withRubric({ ...profile, target: SINGLE_SPEAKER_TEST_GUIDE }, rubric);
+  assert.equal(single.target, rubric.testGuides.single);
+  const agent = withSpeakerScope(single, 'agent');
+  assert.equal(agent.target, rubric.testGuides.conversation);
+  const edited = { ...rubric, testGuides: { ...rubric.testGuides, single: 'Updated single-speaker style.' } };
+  assert.equal(withRubric(single, edited).target, edited.testGuides.single);
+  assert.equal(withRubric({ ...single, target: 'My manual style.' }, DEFAULT_RUBRIC).target, 'My manual style.');
+});
 
 test('test-name locales populate listening language and accent fit without changing the guide or scope', () => {
   const original = { ...profile, scope: 'agent' as const, target: DEFAULT_TEST_GUIDE };

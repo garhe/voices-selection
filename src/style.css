@@ -1,5 +1,23 @@
 .azure-connection{padding:16px;background:#f6f9f6;border:1px solid #e0e9e2;border-radius:9px;margin-bottom:16px}
 .test-identity input{max-width:650px}
+.setup-grid .judge{align-items:flex-end}
+.judge>.judge-avatar,.judge>.icon-button,.judge-fields input{height:40px;min-height:40px}
+.judge>.judge-avatar,.judge>.icon-button{flex:0 0 36px;width:36px}
+.rubric-editor{margin-top:16px;min-width:0}
+.rubric-editor>.voice-evidence{margin-top:10px}
+.rubric-default-guides{margin:12px 0}
+.rubric-dimensions{display:grid;gap:10px;margin:14px 0}
+.rubric-dimension{min-width:0;margin:0;padding:12px;border:1px solid var(--mica-border);border-radius:8px}
+.rubric-dimension legend{padding:0 5px;font-size:1.125rem;font-weight:600;max-width:100%}
+.rubric-dimension legend input:not([type=checkbox]){width:100%;min-width:0;font:inherit;padding:4px 6px}
+.rubric-dimension-heading{display:inline-flex;align-items:center;gap:8px;max-width:100%}
+.rubric-dimension-heading>input[type=checkbox]{flex-shrink:0;margin:0}
+.rubric-dimension legend .rubric-title-button{min-width:0;max-width:100%;font:inherit;color:inherit;background:transparent;border:1px solid transparent;padding:2px 4px;text-align:left;white-space:normal;overflow-wrap:anywhere}
+.rubric-dimension legend .rubric-title-button:enabled:hover{background:var(--mica-hover);color:var(--mica-hover-text)}
+.rubric-dimension .checkbox-label{display:flex;align-items:center;gap:8px}
+.rubric-dimension details{margin-top:8px}
+.rubric-stages{display:flex;flex-wrap:wrap;gap:10px 20px;margin:8px 0}
+.rubric-stages .checkbox-label{margin:0}
 .test-queue{border:1px solid #64887640;border-radius:8px;padding:10px 14px;margin:12px 0;background:var(--mica-surface);font-size:13px}
 .test-queue-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .test-queue-header>span{flex:1;min-width:0;overflow-wrap:anywhere}

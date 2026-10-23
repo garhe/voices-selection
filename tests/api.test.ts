@@ -6,12 +6,88 @@ import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { profile as baseProfile, assessment, clip, job } from './fixtures.js';
-import { RUBRIC_VERSION, type AudioDiagnostics, type Job } from '../shared/domain.js';
+import { RUBRIC_VERSION, DEFAULT_RUBRIC, type Rubric, type AudioDiagnostics, type Job } from '../shared/domain.js';
 import { JudgeAudioError } from '../server/realtime.js';
 import { once } from 'node:events';
 import { createServer, request as httpRequest } from 'node:http';
 
 const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
+
+test('rubric presets persist, protect revisions and built-in defaults, and never replace queued or redo snapshots', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-rubrics-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  let calls = 0;
+  const options = { dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'synthetic-test-key',
+    evaluate: async () => { calls++; return { assessment: assessment(), responseFormat: 'function_call' as const }; } };
+  let backend = await createApp(options);
+  backend.app.use(backend.errors); server.on('request', backend.app);
+  const url = `http://127.0.0.1:${address.port}`;
+  const request = (route: string, body?: unknown, method = body === undefined ? 'GET' : 'POST') => fetch(url + route, {
+    method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  try {
+    assert.deepEqual(await (await request('/api/rubrics')).json(), [DEFAULT_RUBRIC]);
+    const { id: _id, revision: _revision, ...content } = structuredClone(DEFAULT_RUBRIC);
+    content.name = 'Calm delivery';
+    content.dimensions[0].weights.audition = 3;
+    const created = await request('/api/rubrics', content);
+    assert.equal(created.status, 201);
+    const saved: Rubric = await created.json();
+    assert.equal(saved.revision, 1); assert.notEqual(saved.id, DEFAULT_RUBRIC.id);
+    assert.equal((await request('/api/rubrics', content)).status, 409);
+    const invalid = structuredClone(content); invalid.dimensions[0].id = invalid.dimensions[1].id;
+    assert.equal((await request('/api/rubrics', { ...invalid, name: 'Invalid dimensions' })).status, 400);
+    assert.equal((await request(`/api/rubrics/${DEFAULT_RUBRIC.id}`, { ...content, revision: 1 }, 'PUT')).status, 409);
+    assert.equal((await request(`/api/rubrics/${DEFAULT_RUBRIC.id}`, { revision: 1 }, 'DELETE')).status, 409);
+    await request('/api/queue/pause', {});
+    const audio = clip(); await backend.store.saveClip(audio, Buffer.alloc(48000));
+    const source = job([audio], [4, 4]);
+    source.rubric = RUBRIC_VERSION; source.profile = { ...profile, rubric: saved };
+    await backend.store.saveJob(source);
+    const queuedResponse = await request('/api/jobs', {
+      name: 'Snapshot test', profile: source.profile, clipIds: [audio.id], consent: true, enqueue: true, judges: source.judges,
+    });
+    assert.equal(queuedResponse.status, 201);
+    const queued: Job = await queuedResponse.json();
+    const updatedResponse = await request(`/api/rubrics/${saved.id}`, { ...content, name: 'Updated delivery', instructions: 'Listen for relaxed phrase endings.', revision: 1 }, 'PUT');
+    assert.equal(updatedResponse.status, 200);
+    const updated: Rubric = await updatedResponse.json();
+    assert.equal(updated.revision, 2);
+    assert.equal((await request(`/api/rubrics/${saved.id}`, { ...content, revision: 1 }, 'PUT')).status, 409);
+    assert.equal((await request(`/api/rubrics/${saved.id}`, { revision: 1 }, 'DELETE')).status, 409);
+    assert.deepEqual((await (await request(`/api/jobs/${queued.id}`)).json()).profile.rubric, saved);
+    server.removeListener('request', backend.app);
+    backend = await createApp(options); backend.app.use(backend.errors); server.on('request', backend.app);
+    assert.deepEqual(await (await request('/api/rubrics')).json(), [DEFAULT_RUBRIC, updated]);
+    const save = backend.store.save.bind(backend.store);
+    backend.store.save = async (file, value) => {
+      if (file === 'rubrics.json') throw new Error('Synthetic rubric persistence failure');
+      return save(file, value);
+    };
+    const failedWrite = await request('/api/rubrics', { ...content, name: 'Cannot persist' });
+    assert.equal(failedWrite.status, 400);
+    assert.match((await failedWrite.json()).error, /Synthetic rubric persistence failure/);
+    assert.deepEqual(await (await request('/api/rubrics')).json(), [DEFAULT_RUBRIC, updated], 'Failed writes must not change the in-memory library.');
+    backend.store.save = save;
+    assert.equal((await request(`/api/rubrics/${saved.id}`, { revision: 2 }, 'DELETE')).status, 200);
+    assert.deepEqual(await (await request('/api/rubrics')).json(), [DEFAULT_RUBRIC]);
+    const redoResponse = await request('/api/jobs/bulk', { action: 'redo', ids: [source.id], consent: true });
+    assert.equal(redoResponse.status, 200);
+    const redo = await redoResponse.json();
+    assert.equal(redo.succeeded.length, 1); assert.deepEqual(redo.failed, []);
+    const replacement: Job = await (await request(`/api/jobs/${redo.succeeded[0].newId}`)).json();
+    assert.equal(replacement.status, 'queued');
+    assert.deepEqual(replacement.profile.rubric, saved, 'Redo uses the historical snapshot even after preset deletion.');
+    assert.deepEqual((await (await request(`/api/jobs/${queued.id}`)).json()).profile.rubric, saved);
+    assert.deepEqual((await (await request(`/api/jobs/${source.id}`)).json()).profile.rubric, saved);
+    assert.equal(calls, 0);
+  } finally {
+    backend.cancelActive();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('test library summaries and metadata edits persist without re-evaluating or modifying audio and ratings', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-test-library-'));

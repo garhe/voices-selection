@@ -1,8 +1,27 @@
-import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, MAX_SECONDS, type DraftClip, type Profile, type Settings } from '../shared/domain';
+import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, profileRubric, MAX_SECONDS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, type DraftClip, type Profile, type Settings, type Rubric } from '../shared/domain';
 import type { Recording } from './audio';
 import { testNameMetadata } from '../shared/history';
 
-export const DEFAULT_TEST_GUIDE = 'This test evaluates the quality of a service agent’s voice in a call center context. You will hear recorded conversations between a customer and an agent. **Evaluate only the agent’s voice** and compare it with how a natural, authentic call center agent typically sounds in real-world interactions. **Do not evaluate or score the customer’s voice or speaking behavior.** All ratings and comments must focus exclusively on the agent, and your comments should be **as detailed and specific as possible**, describing the agent’s voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
+export { DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE };
+
+export function defaultTestGuide(profile: Pick<Profile, 'scope' | 'rubric'>): string {
+  const guides = profileRubric(profile).testGuides;
+  return profile.scope === 'single' ? guides.single : guides.conversation;
+}
+function usesDefaultGuide(profile: Profile): boolean {
+  const guides = profileRubric(profile).testGuides;
+  return !profile.target.trim() || [guides.single, guides.conversation, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE].includes(profile.target);
+}
+export function withSpeakerScope(profile: Profile, scope: Profile['scope']): Profile {
+  const next = { ...profile, scope };
+  return usesDefaultGuide(profile) ? { ...next, target: defaultTestGuide(next) } : next;
+}
+export function withRubric(profile: Profile, rubric: Rubric): Profile {
+  const next = { ...profile, rubric: { ...rubric, dimensions: rubric.dimensions.map(dimension => ({
+    ...dimension, weights: { audition: dimension.weights.audition > 0 ? 1 : 0, tts: dimension.weights.tts > 0 ? 1 : 0 },
+  })) } };
+  return usesDefaultGuide(profile) ? { ...next, target: defaultTestGuide(next) } : next;
+}
 
 export function withTestNameLanguage(profile: Profile, name: string): Profile {
   const { languages } = testNameMetadata(name);

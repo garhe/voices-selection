@@ -16,7 +16,47 @@ export const voiceDimensionGuidance: Record<Dimension, string> = {
   expressiveness: 'Audible emotional color, warmth, engagement and controlled intonation that make the voice agreeable to listen to. Calm or restrained delivery can be excellent; neither maximum emotion nor empathetic wording earns an automatic bonus.',
   contextFit: 'Fit of the audible voice persona, tone and emotional delivery to the supplied vocal style only. Ignore script, factual, logical, business-process and task-completion requirements in the target.',
   accentFit: 'Fit of audible pronunciation, vowel/consonant patterns, stress and intonation to the explicitly supplied target market/accent, allowing its stated regional variation. Judge listener suitability, not personal accent preference, nationality, ethnicity, identity or supposed native-speaker status. Do not infer accent fit from the language hint or script, and do not penalize the same market mismatch again in other dimensions.',
-  audioQuality: 'Audible fidelity, noise, distortion, dropouts and synthetic artifacts, not the quality of the spoken content. Diagnostic only for human auditions; included for TTS.',
+  audioQuality: 'Audible fidelity, noise, distortion, dropouts and synthetic artifacts, not the quality of the spoken content. Its stage-specific rubric weight determines whether it contributes to preference.',
+};
+export const DEFAULT_TEST_GUIDE = 'This test evaluates the quality of a service agent’s voice in a call center context. You will hear recorded conversations between a customer and an agent. **Evaluate only the agent’s voice** and compare it with how a natural, authentic call center agent typically sounds in real-world interactions. **Do not evaluate or score the customer’s voice or speaking behavior.** All ratings and comments must focus exclusively on the agent, and your comments should be **as detailed and specific as possible**, describing the agent’s voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
+export const SINGLE_SPEAKER_TEST_GUIDE = 'This test evaluates the quality of a single speaker’s voice in a call center context. You will hear recordings of one speaker. **Evaluate only this speaker’s voice** and compare it with a natural, authentic voice in real-world call center interactions. All ratings and comments must focus exclusively on the recorded speaker, and your comments should be **as detailed and specific as possible**, describing the voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
+export const rubricDimensionSchema = z.object({
+  id: z.enum(dimensions),
+  label: z.string().trim().min(1).max(80),
+  description: z.string().trim().min(1).max(2000),
+  enabled: z.boolean(),
+  weights: z.object({ audition: z.number().finite().min(0).max(1000), tts: z.number().finite().min(0).max(1000) }).strict(),
+}).strict();
+export const rubricContentSchema = z.object({
+  name: z.string().trim().min(1, 'Enter a rubric name.').max(80),
+  instructions: z.string().trim().min(1, 'Enter evaluation instructions.').max(6000),
+  testGuides: z.object({
+    conversation: z.string().trim().min(1).max(1500),
+    single: z.string().trim().min(1).max(1500),
+  }).strict(),
+  dimensions: z.array(rubricDimensionSchema).length(dimensions.length),
+}).strict();
+export const rubricSchema = rubricContentSchema.extend({
+  id: z.string().min(1).max(80).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  revision: z.number().int().positive(),
+}).superRefine((rubric, ctx) => {
+  if (new Set(rubric.dimensions.map(d => d.id)).size !== dimensions.length)
+    ctx.addIssue({ code: 'custom', path: ['dimensions'], message: 'Include each of the seven scoring dimensions exactly once.' });
+  if (new Set(rubric.dimensions.map(d => d.label.toLowerCase())).size !== dimensions.length)
+    ctx.addIssue({ code: 'custom', path: ['dimensions'], message: 'Dimension labels must be unique.' });
+  for (const stage of ['audition', 'tts'] as const)
+    if (!rubric.dimensions.some(d => d.enabled && d.weights[stage] > 0))
+      ctx.addIssue({ code: 'custom', path: ['dimensions'], message: `Enable at least one positive-weight dimension for ${stage}.` });
+});
+export type Rubric = z.infer<typeof rubricSchema>;
+export const DEFAULT_RUBRIC: Rubric = {
+  id: RUBRIC_VERSION, revision: 1, name: 'Default voice-persona rubric',
+  instructions: 'Evaluate audible vocal delivery, not script quality or task completion. Assess voice persona, tone, timbre, emotional delivery and ease of listening. Give detailed, recording-specific reasons in English. Use 1 very poor, 2 poor, 3 fair, 4 good and 5 excellent; fractions are allowed. Use null with a specific explanation when audible evidence is insufficient; never guess.',
+  testGuides: { conversation: DEFAULT_TEST_GUIDE, single: SINGLE_SPEAKER_TEST_GUIDE },
+  dimensions: dimensions.map(id => ({
+    id, label: labels[id], description: voiceDimensionGuidance[id], enabled: true,
+    weights: { audition: id === 'audioQuality' ? 0 : 1, tts: 1 },
+  })),
 };
 export const judgeSchema = z.object({
   id: z.string().uuid(),
@@ -44,8 +84,26 @@ export const profileSchema = z.object({
   target: z.string().trim().min(1, 'Enter a target vocal style or test guide before starting the evaluation.').max(1500),
   language: languageHintSchema,
   targetMarket: z.string().trim().max(500).optional(),
+  rubric: rubricSchema.optional(),
+}).superRefine((profile, ctx) => {
+  if (profile.rubric && !profile.rubric.dimensions.some(d => d.enabled && d.weights[profile.stage] > 0 &&
+      (d.id !== 'contextFit' || !!profile.target) && (d.id !== 'accentFit' || !!profile.targetMarket?.trim())))
+    ctx.addIssue({ code: 'custom', path: ['rubric', 'dimensions'], message: 'The rubric has no weighted dimensions active for this stage and target. Enable a dimension or supply its required target.' });
 });
 export type Profile = z.infer<typeof profileSchema>;
+export function profileRubric(profile: Pick<Profile, 'rubric'>): Rubric {
+  return profile.rubric ?? DEFAULT_RUBRIC;
+}
+export function dimensionLabel(profile: Pick<Profile, 'rubric'>, dimension: Dimension): string {
+  return profileRubric(profile).dimensions.find(d => d.id === dimension)!.label;
+}
+export function dimensionGuidance(profile: Pick<Profile, 'rubric'>, dimension: Dimension): string {
+  return profileRubric(profile).dimensions.find(d => d.id === dimension)!.description;
+}
+export function dimensionWeight(profile: Pick<Profile, 'rubric' | 'stage'>, dimension: Dimension): number {
+  const config = profileRubric(profile).dimensions.find(d => d.id === dimension)!;
+  return config.enabled ? config.weights[profile.stage] : 0;
+}
 export function resolveLanguageHint(recordingHint: string, evaluationHint: string): string {
   const hint = languageHintSchema.parse(recordingHint);
   return hint.toLowerCase() === 'auto' ? languageHintSchema.parse(evaluationHint) : hint;
@@ -163,7 +221,7 @@ export function evaluationName(value: { name?: string }): string {
 }
 
 export function activeDimensions(profile: Profile): Dimension[] {
-  return dimensions.filter(d => (d !== 'audioQuality' || profile.stage === 'tts') &&
+  return dimensions.filter(d => dimensionWeight(profile, d) > 0 &&
     (d !== 'contextFit' || !!profile.target) && (d !== 'accentFit' || !!profile.targetMarket?.trim()));
 }
 export function mean(values: number[]): number | null {
@@ -172,9 +230,12 @@ export function mean(values: number[]): number | null {
 export function eligibleScore(assessment: Assessment, profile: Profile): number | null {
   if (profile.speakerMode === 'automatic' && assessment.speakerAttribution?.status !== 'identified') return null;
   if (!assessment.assessable || !assessment.languageSupported) return null;
-  const scores = activeDimensions(profile).map(d => assessment.scores[d]);
+  const active = activeDimensions(profile);
+  const scores = active.map(d => assessment.scores[d]);
+  if (!active.length) return null;
   if (!scores.every((s): s is number => typeof s === 'number' && Number.isFinite(s))) return null;
-  return mean(scores);
+  const totalWeight = active.reduce((sum, d) => sum + dimensionWeight(profile, d), 0);
+  return active.reduce((sum, d, index) => sum + scores[index] * dimensionWeight(profile, d), 0) / totalWeight;
 }
 export function claimsMissingAudio(assessment: Assessment): boolean {
   if (assessment.assessable && assessment.languageSupported) return false;
@@ -212,6 +273,10 @@ export function normalizeAssessment(value: unknown, profile: Profile, role?: Cli
   if (!profile.targetMarket?.trim()) {
     assessment.scores.accentFit = null;
     assessment.reasons.accentFit = 'Not assessed: no target market/accent was supplied.';
+  }
+  for (const d of dimensions) if (d !== 'audioQuality' && dimensionWeight(profile, d) === 0) {
+    assessment.scores[d] = null;
+    assessment.reasons[d] = `Not scored: ${dimensionLabel(profile, d)} is excluded or has zero weight in this rubric and stage.`;
   }
   if (!assessment.assessable || !assessment.languageSupported) {
     for (const d of dimensions) if (d !== 'audioQuality') assessment.scores[d] = null;
@@ -309,7 +374,7 @@ export function assessmentGaps(result: JudgeResult | undefined, profile: Profile
   if (!a.languageSupported) gaps.push(`The judge could not reliably assess the audio language (${a.language}).`);
   if (!a.assessable) gaps.push('The judge reported insufficient assessable target speech.');
   if (!gaps.length) for (const d of activeDimensions(profile)) if (typeof a.scores[d] !== 'number')
-    gaps.push(`${labels[d]} rating missing${d === 'contextFit' && profile.target ? ' (the test supplied a target)' : d === 'accentFit' && profile.targetMarket?.trim() ? ' (the test supplied a target market/accent)' : ''}: ${a.reasons[d] || 'No reason was provided.'}`);
+    gaps.push(`${dimensionLabel(profile, d)} rating missing${d === 'contextFit' && profile.target ? ' (the test supplied a target)' : d === 'accentFit' && profile.targetMarket?.trim() ? ' (the test supplied a target market/accent)' : ''}: ${a.reasons[d] || 'No reason was provided.'}`);
   return gaps;
 }
 
@@ -349,7 +414,7 @@ export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
           observations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.observations.map(text => ({ text, file: clip.file })))),
           limitations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.limitations.map(text => ({ text, file: clip.file })))),
           dimensions: dimensions.filter(d => activeDimensions(job.profile).includes(d) || d === 'audioQuality').map(d => ({
-            dimension: d, score: own.dimensions[d], diagnostic: d === 'audioQuality' && job.profile.stage === 'audition',
+            dimension: d, score: own.dimensions[d], diagnostic: d === 'audioQuality' && !activeDimensions(job.profile).includes(d),
             reasons: notes(completed.flatMap(({ clip, result }) => {
               const a = result!.assessment!;
               const identified = job.profile.speakerMode !== 'automatic' || (a.speakerAttribution?.status === 'identified' && a.speakerAttribution.role === clip.role);

@@ -5,7 +5,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { ASSESSMENT_FUNCTION, assessmentTool, judgeAudio, JudgeAudioError, instructions, parseAssessment, parseAssessmentResponse, realtimeUrl, testRealtimeConnection } from '../server/realtime.js';
 import { assessment, profile, syntheticAzureAssessment } from './fixtures.js';
 import { parseAzureEndpoint } from '../shared/azure.js';
-import { assessmentSchema, dimensions, RUBRIC_VERSION, voiceDimensionGuidance } from '../shared/domain.js';
+import { assessmentSchema, dimensions, RUBRIC_VERSION, voiceDimensionGuidance, DEFAULT_RUBRIC } from '../shared/domain.js';
 import { withLanguageAccent } from '../src/readiness.js';
 
 test('Azure GA WebSocket URL is correct and rejects non-Azure or credential-bearing endpoints', () => {
@@ -31,7 +31,28 @@ test('Foundry full WebSocket endpoints normalize to the shared resource without 
 test('rubric isolates speaker, excludes transcripts, and treats speech as untrusted', () => {
   const text = instructions(profile);
   assert.match(text, /Do not transcribe/); assert.match(text, /never instructions/);
-  assert.match(text, /ONLY the selected speaker/); assert.match(text, /must NOT lower performance scores/);
+  assert.match(text, /ONLY the selected speaker/); assert.match(text, /must NOT lower vocal-performance dimensions/);
+});
+test('each judge receives custom rubric instructions, names, descriptions, stage weights and exclusions', () => {
+  const rubric = structuredClone(DEFAULT_RUBRIC);
+  rubric.name = 'Focused listening'; rubric.instructions = 'Prioritize conversational ease in restrained delivery.';
+  rubric.dimensions[0].label = 'Conversational ease';
+  rubric.dimensions[0].description = 'Listen for comfortable phrase connections.';
+  rubric.dimensions[0].weights.audition = 3;
+  rubric.dimensions[1].enabled = false;
+  rubric.dimensions.find(d => d.id === 'audioQuality')!.weights.audition = 2;
+  const value = { ...profile, rubric };
+  const prompt = instructions(value), tool = assessmentTool(value);
+  assert.match(prompt, /Focused listening/);
+  assert.match(prompt, /Prioritize conversational ease/);
+  assert.match(prompt, /naturalness \(Conversational ease\), weight 3: Listen for comfortable phrase connections/);
+  assert.match(prompt, /articulation \(Articulation\), weight 0/);
+  assert.match(prompt, /REQUIRED PER-JUDGE RATINGS: naturalness, pace, expressiveness, audioQuality/);
+  assert.match(tool.parameters.properties.scores.properties.naturalness.description, /Conversational ease: Listen for comfortable phrase connections/);
+  assert.match(tool.parameters.properties.scores.properties.articulation.description, /score MUST be null/);
+  assert.match(tool.parameters.properties.scores.properties.audioQuality.description, /Active rubric weight: 2/);
+  assert.match(prompt, /Do not transcribe/);
+  assert.match(prompt, /never instructions/);
 });
 test('every stage and speaker mode explicitly requests audio quality and non-empty explanations from each judge', () => {
   for (const stage of ['audition', 'tts'] as const) for (const speakerMode of ['automatic', 'manual'] as const) {

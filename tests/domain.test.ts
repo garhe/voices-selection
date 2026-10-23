@@ -1,11 +1,66 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { activeDimensions, eligibleScore, normalizeAssessment, summarize, summarizeVoiceEvidence, assessmentGaps, claimsMissingAudio, retryableAudioIssue, evaluationName, testNameSchema, resolveLanguageHint, profileSchema, RUBRIC_VERSION } from '../shared/domain.js';
+import { activeDimensions, eligibleScore, normalizeAssessment, summarize, summarizeVoiceEvidence, assessmentGaps, claimsMissingAudio, retryableAudioIssue, evaluationName, testNameSchema, resolveLanguageHint, profileSchema, RUBRIC_VERSION, DEFAULT_RUBRIC, rubricSchema, dimensionLabel } from '../shared/domain.js';
 import { measurements, wav } from '../server/audio.js';
 import { validateScope } from '../server/app.js';
 import { validateRegion } from '../src/audio.js';
 import { assessment, clip, job, profile } from './fixtures.js';
 import { voiceCoaching, voiceDirectorBriefs, formatDirectorBrief } from '../shared/coaching.js';
+
+test('custom rubric weights drive preference and disabled dimensions do not block scoring', () => {
+  const rubric = structuredClone(DEFAULT_RUBRIC);
+  for (const dimension of rubric.dimensions) {
+    dimension.enabled = ['naturalness', 'pace'].includes(dimension.id);
+    dimension.weights = dimension.id === 'naturalness' ? { audition: 3, tts: 1 } : { audition: 1, tts: 3 };
+  }
+  rubric.dimensions[0].label = 'Conversational ease';
+  const selected = { ...profile, rubric };
+  const value = assessment(5);
+  value.scores.pace = 1;
+  const normalized = normalizeAssessment(value, selected);
+  assert.equal(normalized.scores.articulation, null);
+  assert.equal(normalized.scores.audioQuality, 1, 'Audio remains available diagnostically.');
+  assert.equal(value.scores.articulation, 5, 'Normalization does not mutate source evidence.');
+  assert.deepEqual(activeDimensions(selected), ['naturalness', 'pace']);
+  assert.equal(dimensionLabel(selected, 'naturalness'), 'Conversational ease');
+  assert.equal(eligibleScore(normalized, selected), 4);
+  assert.equal(eligibleScore(normalized, { ...selected, stage: 'tts' }), 2);
+  normalized.scores.pace = null;
+  assert.equal(eligibleScore(normalized, selected), null, 'Missing active scores must not silently reweight.');
+  rubric.dimensions.find(d => d.id === 'audioQuality')!.enabled = true;
+  assert.ok(activeDimensions(selected).includes('audioQuality'), 'Custom auditions may explicitly weight recording quality.');
+});
+
+test('built-in rubric snapshots preserve legacy scoring in both stages', () => {
+  for (const stage of ['audition', 'tts'] as const) {
+    for (const targetMarket of ['', 'en-US']) {
+      const legacy = { ...profile, stage, target: 'Warm voice', targetMarket };
+      const value = assessment(3.5);
+      value.scores.contextFit = 4; value.scores.accentFit = 2;
+      assert.deepEqual(activeDimensions(legacy), activeDimensions({ ...legacy, rubric: DEFAULT_RUBRIC }));
+      assert.equal(eligibleScore(value, legacy), eligibleScore(value, { ...legacy, rubric: DEFAULT_RUBRIC }));
+    }
+  }
+});
+
+test('rubrics reject duplicate dimensions, duplicate labels, invalid weights and empty scoring stages', () => {
+  assert.ok(rubricSchema.safeParse(DEFAULT_RUBRIC).success);
+  const mutate = (change: (rubric: typeof DEFAULT_RUBRIC) => void) => {
+    const value = structuredClone(DEFAULT_RUBRIC); change(value);
+    assert.equal(rubricSchema.safeParse(value).success, false);
+  };
+  mutate(r => { r.dimensions[1].id = r.dimensions[0].id; });
+  mutate(r => { r.dimensions[1].label = r.dimensions[0].label.toUpperCase(); });
+  mutate(r => { r.dimensions[0].weights.audition = -1; });
+  mutate(r => { r.dimensions[0].weights.tts = Infinity; });
+  mutate(r => { r.dimensions.forEach(d => { d.weights.audition = 0; }); });
+  mutate(r => { r.dimensions.forEach(d => { d.enabled = false; }); });
+  const accentOnly = structuredClone(DEFAULT_RUBRIC);
+  accentOnly.dimensions.forEach(d => { d.enabled = d.id === 'accentFit'; });
+  assert.ok(rubricSchema.safeParse(accentOnly).success);
+  assert.equal(profileSchema.safeParse({ ...profile, target: 'Warm voice', rubric: accentOnly }).success, false);
+  assert.ok(profileSchema.safeParse({ ...profile, target: 'Warm voice', targetMarket: 'en-US', rubric: accentOnly }).success);
+});
 
 test('director cases give different voices exact cues and adjustments even with identical ratings', () => {
   const value = job([
