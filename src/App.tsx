@@ -10,6 +10,7 @@ import { canManageTest, testHistory, testMetadataSchema, testNameMetadata, type 
 import { TestLibrary, TestMetadataEditor, type ReportKind } from './TestLibrary';
 import { TestQueue } from './TestQueue';
 import { ConfirmationDialog } from './ConfirmationDialog';
+import { ThemePicker } from './ThemePicker';
 
 type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string };
 type History = TestHistory;
@@ -599,7 +600,7 @@ export function App() {
       <div className="sidebar-foot"><span className={`dot ${config?.configured ? 'green' : ''}`} /> {config?.configured ? 'Azure credentials configured' : 'Azure setup required'}<small>Local-first · Audio-only assessment</small></div>
     </aside>
     <main>
-      <header className="topbar"><span>WORKSPACE <b>/</b> {tab === 'setup' ? 'New evaluation' : 'Test Reports'}</span><span className="pill">MULTI-JUDGE PREVIEW</span></header>
+      <header className="topbar"><span>WORKSPACE <b>/</b> {tab === 'setup' ? 'New evaluation' : 'Test Reports'}</span><div className="topbar-actions"><ThemePicker /></div></header>
       {notice && <div className="notice" role="alert"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice('')}>×</button></div>}
       {busy && <div className="working" role="status"><span className="spinner" /> {busy}</div>}
       {queue && <TestQueue state={queue} busy={!!busy}
@@ -877,7 +878,6 @@ export function App() {
         </>}
         </div>
       </>}
-      <footer>Voices Selection · Audio-only evaluation · Your judgement remains the final one.</footer>
     </main>
   </div>;
 }

@@ -9,11 +9,14 @@ import { ConfirmationDialog } from '../src/ConfirmationDialog.js';
 import { TestActions } from '../src/TestActions.js';
 import { readFileSync } from 'node:fs';
 import { DatePicker, calendarDateKey, calendarDays, parseCalendarDate, shiftCalendarMonth } from '../src/DatePicker.js';
+import { ThemePicker } from '../src/ThemePicker.js';
+import { App } from '../src/App.js';
+import { DEFAULT_THEME_COLOR, themeFamilies, themePalette, themePresets, validThemeColor } from '../src/theme.js';
 
-test('shared surface styles keep overlays opaque and native checkboxes free of decorative highlights', () => {
+test('shared surfaces keep opaque fallbacks, readable headers and flat native checkboxes', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
-  assert.match(css, /--mica-flyout:\s*#f7faf9;/);
-  assert.match(css, /--mica-header:\s*#edf4f1;/);
+  assert.match(css, /--mica-flyout:\s*rgb\(var\(--theme-surface-rgb\)\);/);
+  assert.match(css, /--mica-header:\s*var\(--theme-header\);/);
   for (const selector of ['confirmation-dialog', 'test-action-menu', 'date-menu']) {
     const block = css.match(new RegExp(`\\.${selector}\\{([^}]+)\\}`))?.[1];
     assert.ok(block);
@@ -22,6 +25,146 @@ test('shared surface styles keep overlays opaque and native checkboxes free of d
   }
   assert.match(css, /input:not\(\[type=checkbox\]\), textarea, select, \.secondary/);
   assert.match(css, /input\[type=checkbox\]\s*\{[^}]*padding:\s*0;[^}]*box-shadow:\s*none;/);
+});
+
+test('foreground layers share translucent backdrop blur with solid accessibility fallbacks', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  const overlays = css.match(/\.confirmation-dialog, \.test-action-menu, \.date-menu, \.theme-menu \{([^}]+)\}/)?.[1];
+  assert.ok(overlays);
+  assert.match(overlays, /-webkit-backdrop-filter: var\(--mica-flyout-filter\)/);
+  assert.match(overlays, /backdrop-filter: var\(--mica-flyout-filter\)/);
+  const blurSupport = css.slice(css.indexOf('@supports (backdrop-filter:'), css.indexOf('@media (prefers-reduced-transparency:'));
+  assert.match(overlays, /background-image: var\(--mica-flyout-sheen\)/);
+  assert.match(overlays, /border-color: var\(--mica-flyout-border\)/);
+  assert.match(css, /--mica-flyout-alpha: \.12;/);
+  assert.match(blurSupport, /--mica-flyout: rgba\(var\(--theme-glass-rgb\), var\(--mica-flyout-alpha\)\);/);
+  assert.match(blurSupport, /--mica-flyout-filter: blur\(12px\) saturate\(155%\);/);
+  assert.match(blurSupport, /\.confirmation-dialog \{ background-color: rgba\(var\(--theme-glass-rgb\), \.82\); \}/);
+  const reduced = css.slice(css.indexOf('@media (prefers-reduced-transparency:'), css.lastIndexOf('@media (forced-colors: active)'));
+  assert.match(reduced, /--mica-flyout: rgb\(var\(--theme-surface-rgb\)\);/);
+  assert.match(reduced, /--mica-flyout-filter: none;/);
+  assert.match(reduced, /--mica-flyout-sheen: none;/);
+  const contrast = css.slice(css.lastIndexOf('@media (forced-colors: active)'));
+  assert.match(contrast, /--mica-flyout: Canvas;/);
+  assert.match(contrast, /--mica-flyout-filter: none;/);
+});
+
+test('hover states use contrasting fills and labels without replacing persistent selection', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /--mica-hover: var\(--theme-accent\);/);
+  assert.match(css, /--mica-hover-text: #ffffff;/);
+  assert.match(css, /\.test-table tbody tr:hover\{background:var\(--theme-row-hover\);box-shadow:inset 3px 0 0 var\(--theme-accent\)\}/);
+  assert.match(css, /\.theme-preset:enabled:hover \{ background: var\(--mica-hover\); border-color: var\(--mica-focus\); \}/);
+  assert.match(css, /select option:checked, select option:enabled:hover, select option:focus-visible \{ background: var\(--mica-hover\); color: var\(--mica-hover-text\); \}/);
+  assert.match(css, /\.calendar-grid \[aria-selected=true\]>button\{background:var\(--mica-selected\)/);
+  const contrast = css.slice(css.lastIndexOf('@media (forced-colors: active)'));
+  assert.match(contrast, /--mica-hover-text: HighlightText;/);
+  assert.match(contrast, /background: Highlight;\s*color: HighlightText;/);
+});
+
+test('workspace omits the preview badge and redundant bottom footer without disabling page scroll', () => {
+  const html = renderToStaticMarkup(createElement(App));
+  assert.equal(html.includes('MULTI-JUDGE PREVIEW'), false);
+  assert.equal(html.includes('<footer>'), false);
+  assert.ok(html.includes('I have permission to send these audio inputs'));
+  assert.ok(html.includes('AI opinion scores are not validated MOS'));
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /main \{ max-width: none; padding-bottom: 8px; \}/);
+  assert.doesNotMatch(css, /(?:body|html)\s*\{[^}]*overflow:\s*hidden/);
+});
+
+test('wide layouts expand the sidebar and workspace while preserving compact breakpoints', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /width: clamp\(264px, 16vw, 440px\);/);
+  assert.match(css, /main \{ max-width: none;/);
+  assert.match(css, /@media \(min-width: 1201px\) \{\s*\.sidebar \{ --sidebar-padding-inline: clamp\(18px, 1\.25vw, 32px\); padding-inline: var\(--sidebar-padding-inline\); \}/);
+  assert.match(css, /@media \(max-width: 1200px\) \{\s*\.sidebar \{ width: 240px; --sidebar-padding-inline: 12px; \}/);
+  assert.match(css, /\.sidebar \{ width: 64px; --sidebar-padding-inline: 6px; \}/);
+});
+
+test('sidebar history rows align with navigation while the scrollbar occupies a separate lane', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /container-type: inline-size;/);
+  assert.match(css, /\.history-list > \.history-item \{ width: 100cqw; \}/);
+  const history = css.match(/\.sidebar-history \{\s*display: flex;([^}]+)\}/)?.[1];
+  assert.ok(history);
+  assert.match(history, /margin-right: calc\(-1 \* var\(--sidebar-padding-inline\)\)/);
+  const list = css.match(/\.history-list \{([^}]+)\}/)?.[1];
+  assert.ok(list);
+  assert.match(list, /overflow: auto;/);
+  assert.match(list, /padding-right: 0;/);
+});
+
+test('Color picker exposes five muted families with three shades, a custom color and reset', () => {
+  const html = renderToStaticMarkup(createElement(ThemePicker));
+  assert.match(html, /class="secondary theme-trigger"[^>]*aria-haspopup="dialog" aria-expanded="false"/);
+  assert.match(html, /<\/span> Color<\/button>/);
+  assert.match(html, /class="theme-menu" popover="auto" role="dialog" aria-label="Color &amp; shade"/);
+  assert.ok(html.includes(`type="color" value="${DEFAULT_THEME_COLOR}"`));
+  assert.match(html, /aria-label="Reset to default"/);
+  assert.match(html, /role="status">Sage \/ Soft<\/span>/);
+  assert.equal((html.match(/class="theme-preset-column"/g) ?? []).length, 5);
+  assert.equal((html.match(/class="theme-preset"/g) ?? []).length, 15);
+  for (const preset of themePresets) assert.ok(html.includes(`aria-label="Use ${preset.name} color"`));
+  assert.equal((html.match(/aria-pressed="true"/g) ?? []).length, 1);
+});
+
+test('curated preset families have distinct muted shades ordered from mist to deep', () => {
+  assert.deepEqual(themeFamilies.map(family => family.name), ['Sage', 'Lagoon', 'Sky', 'Iris', 'Rose']);
+  assert.equal(new Set(themePresets.map(preset => preset.color)).size, 15);
+  for (const family of themeFamilies) {
+    const presets = themePresets.filter(preset => preset.family === family.name);
+    assert.deepEqual(presets.map(preset => preset.shade), ['Mist', 'Soft', 'Deep']);
+    let previousBrightness = Infinity;
+    for (const preset of presets) {
+      assert.equal(validThemeColor(preset.color), true);
+      const channels = [1, 3, 5].map(index => Number.parseInt(preset.color.slice(index, index + 2), 16));
+      assert.ok(Math.max(...channels) - Math.min(...channels) < 85, `${preset.name} should be muted`);
+      const brightness = channels.reduce((sum, channel) => sum + channel, 0);
+      assert.ok(brightness < previousBrightness, `${preset.name} should be deeper than the preceding shade`);
+      if (Number.isFinite(previousBrightness))
+        assert.ok(previousBrightness - brightness >= 105, `${preset.name} should visibly contrast with the preceding shade`);
+      previousBrightness = brightness;
+      assert.doesNotThrow(() => themePalette(preset.color));
+    }
+  }
+});
+
+test('interface palettes reject invalid colors and retain white-label contrast across the color range', () => {
+  for (const color of ['', 'red', '#fff', '#12345678', '#zzzzzz', '123456', '#123456;display:none']) {
+    assert.equal(validThemeColor(color), false);
+    assert.throws(() => themePalette(color), /six-digit hex color/);
+  }
+  assert.equal(themePalette('#ABCDEF')['--theme-color'], '#abcdef');
+  const defaultPalette = themePalette(DEFAULT_THEME_COLOR);
+  const changedKeys = ['--theme-page', '--theme-glow', '--theme-surface-rgb', '--theme-panel-rgb', '--theme-sidebar-rgb', '--theme-inset-rgb', '--theme-selected', '--theme-header', '--theme-accent'];
+  const violet = themePalette('#7c3aed');
+  for (const key of changedKeys) assert.notEqual(violet[key], defaultPalette[key], key);
+  for (const r of [0, 51, 102, 153, 204, 255]) for (const g of [0, 51, 102, 153, 204, 255]) for (const b of [0, 51, 102, 153, 204, 255]) {
+    const color = '#' + [r, g, b].map(channel => channel.toString(16).padStart(2, '0')).join('');
+    const palette = themePalette(color);
+    const glass = palette['--theme-glass-rgb'].split(',').map(Number);
+    assert.ok(glass.every(channel => channel >= 200 && channel <= 255), `Readable glass tint for ${color}`);
+    const luminanceOf = (channels: number[]) => channels.map(value => {
+      const channel = value / 255;
+      return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+    }).reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0);
+    const rowHover = palette['--theme-row-hover'].match(/\d+/g)!.map(Number);
+    const surface = palette['--theme-surface-rgb'].split(',').map(Number);
+    assert.ok((luminanceOf(rowHover) + .05) / (luminanceOf([41, 48, 57]) + .05) >= 4.5, `Hovered row text contrast for ${color}`);
+    assert.ok((luminanceOf(surface) + .05) / (luminanceOf(rowHover) + .05) >= 1.3, `Visible row hover fill for ${color}`);
+    const primaryHover = palette['--theme-accent-hover'].match(/\d+/g)!.map(Number);
+    assert.ok(1.05 / (luminanceOf(primaryHover) + .05) >= 4.5, `White primary hover label contrast for ${color}`);
+    const darkestDialogGlass = glass.map(channel => .06 * 255 + .94 * .82 * channel);
+    assert.ok((luminanceOf(darkestDialogGlass) + .05) / (luminanceOf([41, 48, 57]) + .05) >= 4.5, `Dark foreground contrast over dimmed dialog glass for ${color}`);
+    const channels = palette['--theme-accent'].match(/\d+/g)!.map(Number).map(value => {
+      const channel = value / 255;
+      return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+    });
+    const luminance = .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
+    assert.ok(1.05 / (luminance + .05) >= 4.5, `White-label contrast for ${color}`);
+    assert.equal(Object.keys(palette).some(key => key.startsWith('--mica-')), false, 'Custom colors must not override accessibility surface tokens.');
+  }
 });
 
 test('calendar date arithmetic validates leap days and keeps month shifts and week grids stable', () => {
@@ -66,8 +209,9 @@ test('native dropdown theming is feature-detected and supports system high-contr
   assert.match(css, /select::picker-icon \{[^}]*position: absolute;[^}]*right: 12px;[^}]*top: 50%;/);
   const picker = css.match(/select::picker\(select\) \{\s*padding:([\s\S]*?)\n  \}/)?.[1];
   assert.ok(picker);
-  assert.match(picker, /background: var\(--mica-sheen\), var\(--mica-flyout\)/);
+  assert.match(picker, /background: var\(--mica-flyout-sheen\), var\(--mica-flyout\)/);
   assert.match(picker, /box-shadow: var\(--mica-flyout-shadow\)/);
+  assert.match(picker, /backdrop-filter: var\(--mica-flyout-filter\)/);
   const highContrast = css.slice(css.lastIndexOf('@media (forced-colors: active)'));
   for (const declaration of ['--mica-flyout: Canvas;', '--mica-header: Canvas;', '--mica-border: CanvasText;', 'color: HighlightText;'])
     assert.ok(highContrast.includes(declaration));
