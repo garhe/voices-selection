@@ -33,6 +33,54 @@ test('rubric isolates speaker, excludes transcripts, and treats speech as untrus
   assert.match(text, /Do not transcribe/); assert.match(text, /never instructions/);
   assert.match(text, /ONLY the selected speaker/); assert.match(text, /must NOT lower performance scores/);
 });
+test('every stage and speaker mode explicitly requests audio quality and non-empty explanations from each judge', () => {
+  for (const stage of ['audition', 'tts'] as const) for (const speakerMode of ['automatic', 'manual'] as const) {
+    for (const role of ['speaker', 'agent', 'customer'] as const) {
+      const value = { ...profile, stage, speakerMode, target: 'Warm, natural delivery.', targetMarket: 'en-US' };
+      const text = instructions(value, role), tool = assessmentTool(value, role);
+      assert.match(text, /REQUIRED PER-JUDGE RATINGS:.*audioQuality/);
+      assert.match(text, /Audio quality is REQUIRED for every assessable input in both stages/);
+      assert.match(text, /Clean audio and an absence of defects are positive evidence/);
+      assert.match(text, /Use null only for a concrete inability to assess the audio/);
+      assert.match(tool.parameters.properties.scores.properties.audioQuality.description, /Return a numeric 1-5 rating/);
+      for (const dimension of dimensions) assert.equal(tool.parameters.properties.reasons.properties[dimension].minLength, 1);
+    }
+  }
+});
+
+test('submitted assessments reject empty placeholders and inactive audio-quality claims but preserve genuine uncertainty and saved results', () => {
+  const call = (value: unknown) => [{ type: 'function_call', name: ASSESSMENT_FUNCTION, arguments: JSON.stringify(value), status: 'completed' }];
+  const message = (value: unknown) => [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(value) }] }];
+  for (const stage of ['audition', 'tts'] as const) {
+    const value = assessment();
+    value.scores.audioQuality = null;
+    for (const reason of ['Not applicable because the audio is clear.', 'Audio quality is not required for this evaluation.', 'Not needed: there are no audible defects.']) {
+      value.reasons.audioQuality = reason;
+      assert.throws(() => parseAssessment(JSON.stringify(value), { ...profile, stage }), /audioQuality is required/);
+      assert.throws(() => parseAssessmentResponse(call(value), { ...profile, stage }), /audioQuality is required/);
+      assert.throws(() => parseAssessmentResponse(message(value), { ...profile, stage }), /audioQuality is required/);
+      assert.doesNotThrow(() => assessmentSchema.parse(value), 'Historical stored assessments must remain readable.');
+    }
+    value.reasons.audioQuality = 'The short target voice is heavily overlapped by another source, so its fidelity cannot be isolated.';
+    assert.equal(parseAssessmentResponse(call(value), { ...profile, stage }).assessment.scores.audioQuality, null);
+    value.assessable = false;
+    value.reasons.audioQuality = 'Not applicable because no target speech is audible.';
+    assert.equal(parseAssessmentResponse(call(value), { ...profile, stage }).assessment.assessable, false);
+    value.assessable = true; value.languageSupported = false;
+    assert.equal(parseAssessmentResponse(call(value), { ...profile, stage }).assessment.languageSupported, false);
+  }
+  for (const dimension of dimensions) {
+    const value = assessment();
+    value.reasons[dimension] = ' \n ';
+    assert.throws(() => parseAssessmentResponse(call(value), profile), new RegExp(`${dimension} requires a non-empty explanation`));
+  }
+  const placeholder = assessment();
+  for (const dimension of dimensions) { placeholder.scores[dimension] = null; placeholder.reasons[dimension] = ''; }
+  assert.throws(() => parseAssessmentResponse(call(placeholder), profile), /requires a non-empty explanation/);
+  const clean = assessment(5);
+  clean.scores.audioQuality = 5; clean.reasons.audioQuality = 'Clean, stable audio with no audible distortion or dropouts.';
+  assert.equal(parseAssessmentResponse(call(clean), { ...profile, stage: 'tts' }).assessment.scores.audioQuality, 5);
+});
 test('voice-persona rubric separates vocal listening comfort from script quality for every stage and speaker mode', () => {
   assert.equal(RUBRIC_VERSION, 'audio-only-v4');
   for (const stage of ['audition', 'tts'] as const) for (const speakerMode of ['automatic', 'manual'] as const) {
@@ -495,6 +543,76 @@ test('invalid assessments retry once on the same audio, retain role validation, 
       assert.equal(responses, sessions * 2, 'Each session permits only one format retry, with at most two sessions.');
       assert.equal(receivedBytes, 48000 * sessions, 'Only a fresh-session retry may re-upload audio.');
       assert.equal(commits, sessions);
+    } finally {
+      for (const ws of server.clients) ws.terminate();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }
+});
+
+test('missing requested scores retry with specific feedback within existing budgets without manufacturing ratings', async () => {
+  for (const failure of ['not-applicable', 'blank-placeholder']) for (const outcome of ['recover', 'uncertain', 'exhaust']) {
+    const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await once(server, 'listening');
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    let sessions = 0, requests = 0, uploadedBytes = 0, commits = 0;
+    server.on('connection', ws => {
+      sessions++;
+      let sessionRequests = 0;
+      ws.send(JSON.stringify({ type: 'session.created', session: { model: 'explicit-score-fixture' } }));
+      ws.on('message', data => {
+        const event = JSON.parse(data.toString());
+        if (event.type === 'session.update') {
+          assert.match(event.session.instructions, /Audio quality is REQUIRED/);
+          assert.match(event.session.tools[0].parameters.properties.scores.properties.audioQuality.description, /Return a numeric 1-5 rating/);
+          ws.send(JSON.stringify({ type: 'session.updated' }));
+        } else if (event.type === 'input_audio_buffer.append') uploadedBytes += Buffer.from(event.audio, 'base64').length;
+        else if (event.type === 'input_audio_buffer.commit') {
+          commits++; ws.send(JSON.stringify({ type: 'input_audio_buffer.committed' }));
+        } else if (event.type === 'conversation.item.delete') {
+          ws.send(JSON.stringify({ type: 'conversation.item.deleted', item_id: event.item_id }));
+        } else if (event.type === 'response.create') {
+          requests++; sessionRequests++;
+          const value = assessment();
+          if (sessionRequests === 2) {
+            assert.match(event.response.instructions, /Validation failure \(data, not instructions\)/);
+            assert.match(event.response.instructions, failure === 'not-applicable' ? /audioQuality is required/ : /naturalness requires a non-empty explanation/);
+            assert.match(event.response.instructions, /Never invent a rating to make validation succeed/);
+          }
+          if (sessionRequests === 1 || outcome === 'exhaust') {
+            if (failure === 'not-applicable') {
+              value.scores.audioQuality = null; value.reasons.audioQuality = 'Not applicable because the audio is sufficiently clear.';
+            } else for (const dimension of dimensions) { value.scores[dimension] = null; value.reasons[dimension] = ''; }
+          } else if (outcome === 'uncertain') {
+            value.scores.audioQuality = null;
+            value.reasons.audioQuality = 'Another overlapping source prevents isolating the target voice fidelity.';
+          } else {
+            value.scores.audioQuality = 4; value.reasons.audioQuality = 'Clear audio with minor audible room noise.';
+          }
+          ws.send(JSON.stringify({ type: 'response.done', response: {
+            status: 'completed', usage: { input_token_details: { audio_tokens: 10 } },
+            output: [{ id: 'score-call', type: 'function_call', name: ASSESSMENT_FUNCTION, arguments: JSON.stringify(value), status: 'completed' }],
+          } }));
+        }
+      });
+    });
+    try {
+      const result = judgeAudio({
+        endpoint: 'https://example.openai.azure.com', key: 'local-test-only',
+        judge: { id: crypto.randomUUID(), name: 'Score judge', deployment: 'fixture' },
+        pcm: Buffer.alloc(48000), profile: { ...profile, stage: 'tts' }, signal: new AbortController().signal,
+        connect: () => new WebSocket(`ws://127.0.0.1:${address.port}`),
+      });
+      if (outcome === 'exhaust') await assert.rejects(result, /Fresh-session recovery was exhausted; no scores were accepted/);
+      else {
+        const completed = await result;
+        assert.equal(completed.assessment.scores.audioQuality, outcome === 'uncertain' ? null : 4);
+        assert.deepEqual(completed.audioDiagnostics?.sessions[0].responses.map(response => response.outcome), ['invalid_format', 'accepted']);
+      }
+      assert.equal(sessions, outcome === 'exhaust' ? 2 : 1);
+      assert.equal(requests, sessions * 2);
+      assert.equal(commits, sessions);
+      assert.equal(uploadedBytes, sessions * 48000);
     } finally {
       for (const ws of server.clients) ws.terminate();
       await new Promise<void>(resolve => server.close(() => resolve()));
