@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  type Dimension, type Job, type Profile, type Settings, type Summary, type ConnectionStatus, type ConnectionTest, type EvidenceNote, type VoiceEvidence, type DraftClip, type StoredClip,
+  type Dimension, type Job, type Profile, type Settings, type Summary, type ConnectionStatus, type ConnectionTest, type EvidenceNote, type VoiceEvidence, type DraftClip, type StoredClip, type TestQueueState,
   dimensions, labels, voiceDimensionGuidance, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, retryableAudioIssue, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, languageHintSchema, resolveLanguageHint, rolesForScope,
 } from '../shared/domain';
 import { automaticRegions, base64, browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
-import { applyLanguageHint, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent } from './readiness';
+import { applyLanguageHint, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
+import { canManageTest, testHistory, testMetadataSchema, testNameMetadata, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
+import { TestLibrary, TestMetadataEditor, type ReportKind } from './TestLibrary';
+import { TestQueue } from './TestQueue';
+import { ConfirmationDialog } from './ConfirmationDialog';
 
 type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string };
-type History = { id: string; name?: string; createdAt: string; status: string; stage: string; clips: number };
+type History = TestHistory;
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Unexpected error.';
 const score = (n: number | null | undefined) => n == null ? 'Not assessed' : n.toFixed(2);
 async function api<T>(url: string, body?: unknown, method = 'POST', signal?: AbortSignal): Promise<T> {
@@ -24,10 +28,22 @@ async function api<T>(url: string, body?: unknown, method = 'POST', signal?: Abo
   }
   return response.json() as Promise<T>;
 }
+async function loadHistory(): Promise<History[]> {
+  const entries = await api<History[]>('/api/jobs');
+  if (entries.some(entry => !Array.isArray(entry.languages) || !Array.isArray(entry.voices) || !Array.isArray(entry.genders)))
+    throw new Error('The server is using an older test-list format. Restart Voices Selection, then refresh this page.');
+  return entries.map(entry => ({ ...entry, ...testNameMetadata(entry.name) }));
+}
 function download(name: string, data: string, type: string) {
   const url = URL.createObjectURL(new Blob([data], { type }));
   const link = document.createElement('a'); link.href = url; link.download = name; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function exportReportJson(job: Job) {
+  download(`voice-evaluation-${job.id}.json`, JSON.stringify({
+    ...job, name: evaluationName(job), summary: summarize(job), voiceEvidence: summarizeVoiceEvidence(job),
+    improvementGuidance: voiceDirectorBriefs(job),
+  }, null, 2), 'application/json');
 }
 function csvCell(value: unknown) {
   let text = value == null ? '' : String(value);
@@ -134,6 +150,7 @@ function exportCoachingCsv(job: Job) {
   const rows: unknown[][] = [[
     'test_name', 'rubric', 'language_hint', 'voice', 'role', 'director_summary', 'keep_doing', 'delivery_target', 'target_market',
     'focus', 'performance_direction', 'practice_steps', 'listening_check', 'next_take_plan', 'before_you_send', 'brief_notes',
+    'recording_cases', 'saved_recording_feedback',
   ]];
   for (const voice of voiceDirectorBriefs(job)) {
     const common = [
@@ -142,6 +159,8 @@ function exportCoachingCsv(job: Job) {
     for (const focus of voice.focus.length ? voice.focus : [undefined]) rows.push([
       ...common, focus?.title, focus?.direction, focus?.steps.join('\n'), focus?.check,
       voice.takePlan.join('\n'), voice.checklist.join('\n'), voice.notes.join('\n'),
+      focus?.cases.map(item => `${item.recording} (${item.start}-${item.end}s)\nFind: ${item.cue}\nHeard: ${item.observation}\nDo: ${item.direction}\nPass check: ${item.check}`).join('\n\n'),
+      focus?.feedback.map(item => `${item.recording} (${item.start}-${item.end}s): ${item.observation}`).join('\n'),
     ]);
   }
   download(`voice-improvement-guidance-${job.id}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
@@ -149,7 +168,7 @@ function exportCoachingCsv(job: Job) {
 function VoiceImprovement({ job, voices }: { job: Job; voices: VoiceDirectorBrief[] }) {
   return <section className="card voice-coaching">
     <div className="section-with-action"><h2>Voice director: your next take</h2><button className="secondary" onClick={() => exportCoachingCsv(job)}>Export improvement CSV</button></div>
-    <p className="hint">Your next-take rehearsal brief. Read the director's note, choose one adjustment, then try the three takes below. Keep the words unchanged and focus on how your voice sounds and feels. These directions use existing feedback, not a new listening session.</p>
+    <p className="hint">Start with a recording case: find the cue, listen for the reported sound, then try the exact adjustment and pass check. Keep the words unchanged. Older feedback without an exact cue is labeled below; run a new evaluation for specific directions. These notes use existing feedback, not a new listening session.</p>
     {!voices.length && <p>No recordings match this filter yet.</p>}
     {voices.map(voice => <details key={JSON.stringify([voice.voice, voice.role])}>
       <summary><strong>{voice.voice} / {voice.role}</strong> · {voice.status === 'insufficient_feedback' ? 'More feedback needed' : voice.focus.length ? `${voice.focus.length} focus areas` : 'Consistency take'}</summary>
@@ -160,6 +179,17 @@ function VoiceImprovement({ job, voices }: { job: Job; voices: VoiceDirectorBrie
       {voice.targetMarket && <p><strong>Market / accent target:</strong> {voice.targetMarket}</p>}
       {voice.focus.map((focus, index) => <article key={focus.dimension}>
         <h3>{index + 1}. {focus.title}</h3><p>{focus.direction}</p>
+        {focus.cases.map((item, caseIndex) => <div className="callout" key={caseIndex}>
+          <h4>Case {caseIndex + 1}: {item.recording} ({item.start}-{item.end}s excerpt)</h4>
+          <p><strong>Find:</strong> {item.cue}</p>
+          <p><strong>Heard:</strong> {item.observation}</p>
+          <p><strong>Do:</strong> {item.direction}</p>
+          <p><strong>Pass check:</strong> {item.check}</p>
+        </div>)}
+        {focus.feedback.length > 0 && <div className="callout">
+          <h4>Saved feedback - exact direction not available</h4>
+          {focus.feedback.map((item, feedbackIndex) => <p key={feedbackIndex}><strong>{item.recording} ({item.start}-{item.end}s):</strong> {item.observation}</p>)}
+        </div>}
         <h4>Try this</h4><ol>{focus.steps.map(step => <li key={step}>{step}</li>)}</ol>
         <p><strong>Listen for:</strong> {focus.check}</p>
       </article>)}
@@ -259,18 +289,28 @@ function AzureConnection({ config, busy, onAction, onSaved }: {
 export function App() {
   const [tab, setTab] = useState<'setup' | 'results'>('setup');
   const [testName, setTestName] = useState('');
-  const [profile, setProfile] = useState<Profile>({ stage: 'audition', scope: 'single', speakerMode: 'automatic', target: '', language: 'auto', targetMarket: '' });
+  const [profile, setProfile] = useState<Profile>({ stage: 'audition', scope: 'agent', speakerMode: 'automatic', target: DEFAULT_TEST_GUIDE, language: 'auto', targetMarket: '' });
   const [config, setConfig] = useState<Config>();
   const [records, setRecords] = useState<Recording[]>([]);
   const [savedClips, setSavedClips] = useState<DraftClip[]>();
   const [draftSource, setDraftSource] = useState<string>();
   const [confirmDelete, setConfirmDelete] = useState<History>();
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string; description: string; label: string; status: string; run: () => Promise<void>;
+  }>();
+  const [selectedTestIds, setSelectedTestIds] = useState<string[]>([]);
+  const [confirmBulk, setConfirmBulk] = useState<{ action: BulkTestAction; entries: History[] }>();
+  const [bulkConsent, setBulkConsent] = useState(false);
+  const [bulkReport, setBulkReport] = useState<{ action: BulkTestAction; result: BulkTestResult; names: Map<string, string> }>();
   const [selected, setSelected] = useState<string>();
   const [buffer, setBuffer] = useState<AudioBuffer>();
   const [sourceUrl, setSourceUrl] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
   const [history, setHistory] = useState<History[]>([]);
   const [job, setJob] = useState<Job>();
+  const [queue, setQueue] = useState<TestQueueState>();
+  const [showTestList, setShowTestList] = useState(true);
+  const [editingTest, setEditingTest] = useState<Job>();
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
   const [consent, setConsent] = useState(false);
@@ -291,12 +331,33 @@ export function App() {
     finally { busyRef.current = false; setBusy(''); }
   }
   async function refresh() {
-    const [configuration, list] = await Promise.all([api<Config>('/api/config'), api<History[]>('/api/jobs')]);
-    setConfig(configuration); setHistory(list);
+    const [configuration, list, queueState] = await Promise.all([api<Config>('/api/config'), loadHistory(), api<TestQueueState>('/api/queue')]);
+    setConfig(configuration); setHistory(list); setQueue(queueState);
     if (configuration.runtimeError) setNotice(configuration.runtimeError);
   }
   useEffect(() => {
     void refresh().catch(error => setNotice(errorText(error)));
+  }, []);
+  useEffect(() => {
+    const eligible = new Set(history.filter(canManageTest).map(entry => entry.id));
+    setSelectedTestIds(previous => {
+      const next = previous.filter(id => eligible.has(id));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [history]);
+  useEffect(() => {
+    let stopped = false, pending = false;
+    const controller = new AbortController();
+    const timer = setInterval(() => {
+      if (stopped || pending) return;
+      pending = true;
+      void Promise.all([api<TestQueueState>('/api/queue', undefined, 'GET', controller.signal), loadHistory()]).then(([state, list]) => {
+        if (!stopped) { setQueue(state); setHistory(list); }
+      }).catch(error => {
+        if (!stopped) { setNotice(`Queue polling stopped: ${errorText(error)}. Refresh the page to reconnect.`); stopped = true; }
+      }).finally(() => { pending = false; });
+    }, 2000);
+    return () => { stopped = true; controller.abort(); clearInterval(timer); };
   }, []);
   useEffect(() => {
     if (!currentFile) { setBuffer(undefined); setSourceUrl(''); setPreviewUrl(''); return; }
@@ -314,14 +375,17 @@ export function App() {
   }, [currentFile, selected, profile.scope]);
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
   useEffect(() => {
-    if (!job || job.status !== 'running') return;
+    if (!job || !['running', 'queued'].includes(job.status)) return;
     let stopped = false, pending = false;
     const controller = new AbortController();
     const timer = setInterval(() => {
       if (stopped || pending) return;
       pending = true;
       void api<Job>(`/api/jobs/${job.id}`, undefined, 'GET', controller.signal).then(value => {
-        if (!stopped) setJob(value);
+        if (!stopped) {
+          setJob(value);
+          setHistory(previous => previous.map(entry => entry.id === value.id ? testHistory(value) : entry));
+        }
       }).catch(error => {
         if (!stopped) { setNotice(`Progress polling stopped: ${errorText(error)}. Use Refresh results.`); stopped = true; }
       }).finally(() => { pending = false; });
@@ -329,7 +393,7 @@ export function App() {
     return () => { stopped = true; controller.abort(); clearInterval(timer); };
   }, [job?.id, job?.status]);
   useEffect(() => {
-    if (job && job.status !== 'running') void api<History[]>('/api/jobs').then(setHistory).catch(error => setNotice(errorText(error)));
+    if (job && job.status !== 'running') void loadHistory().then(setHistory).catch(error => setNotice(errorText(error)));
   }, [job?.id, job?.status]);
   function defaultRegions(scope: Profile['scope'], duration: number): Region[] {
     const roles = rolesForScope(scope);
@@ -340,11 +404,12 @@ export function App() {
   }
   function beginNewEvaluation() {
     if (tab === 'setup') return;
-    setProfile(withLanguageAccent(job?.profile ?? profile));
+    setProfile(withTestNameLanguage({ ...(job?.profile ?? profile), target: DEFAULT_TEST_GUIDE }, ''));
     if (job) setConfig(previous => previous ? { ...previous, judges: job.judges.map(judge => ({ ...judge })) } : previous);
     setTestName(''); setRecords([]); setSavedClips(undefined); setDraftSource(undefined);
     setSelected(undefined); setBuffer(undefined); setSourceUrl(''); setPreviewUrl('');
     setConsent(false); setConfirmDelete(undefined); setTab('setup');
+    setEditingTest(undefined);
     setNotice('New test draft ready. Previous evaluation settings are kept; recordings and audio permission are cleared. Enter a test name and select a folder. Saved results are unchanged.');
   }
   function applyLanguageToAll() {
@@ -390,8 +455,9 @@ export function App() {
     }
     updateRecording(current.id, { regions: current.regions.map(r => ({ ...r, confirmed: true })) });
   }
-  async function start() {
-    if (startBlockers.length) throw new Error(startBlockers.join(' '));
+  async function start(enqueue = false) {
+    const blockers = enqueue ? queueBlockers : startBlockers;
+    if (blockers.length) throw new Error(blockers.join(' '));
     const name = testNameSchema.parse(testName);
     if (!config?.configured) throw new Error('Save your Azure endpoint and API key in the Azure connection settings first.');
     await api('/api/settings', { judges: config.judges }, 'PUT');
@@ -416,28 +482,76 @@ export function App() {
       }
     }
     const value = await api<Job>('/api/jobs', {
-      name, profile, clipIds, consent: true,
+      name, profile, clipIds, consent: true, enqueue, judges: config.judges,
       clipOverrides: selectedClips?.map(c => ({ id: c.id, voice: c.voice, language: resolveLanguageHint(c.language, profile.language) })),
     });
-    setJob(value); setLanguageFilter('all'); setTab('results'); await refresh();
+    if (enqueue) {
+      setTestName(''); setRecords([]); setSelected(undefined); setSavedClips(undefined); setDraftSource(undefined); setConsent(false);
+      setProfile(previous => withTestNameLanguage({ ...previous, target: DEFAULT_TEST_GUIDE }, ''));
+      setNotice(`"${name}" added to the queue. Prepare the next test; saved tests run one at a time, even if this browser is closed. Keep the server running.`);
+    } else {
+      setJob(value); setShowTestList(false); setLanguageFilter('all'); setTab('results');
+    }
+    await refresh();
   }
   async function reuseEvaluation(source: Job) {
-    if ((records.length || savedClips) && !window.confirm('Replace the current setup draft with this evaluation? Saved results will not change.')) return;
     const draft = await api<{ job: Job; clips: StoredClip[]; missing: number }>(`/api/jobs/${source.id}/draft`);
     setTestName(evaluationName(draft.job)); setProfile(withLanguageAccent(draft.job.profile));
     setConfig(previous => previous ? { ...previous, judges: draft.job.judges.map(j => ({ ...j })) } : previous);
     setRecords([]); setSelected(undefined); setSavedClips(draft.clips.map(c => ({ ...c, include: true })));
     setDraftSource(evaluationName(draft.job)); setConsent(false); setTab('setup');
+    setEditingTest(undefined);
     setNotice(draft.missing
       ? `${draft.missing} saved audio input(s) are missing. Only available audio was copied; re-import originals if needed.`
       : 'Editable draft created. The combined language/accent field uses the previous accent target when supplied; review it before starting. Authorize the audio to create a new evaluation. Saved results are unchanged.');
   }
+  function requestReuseEvaluation(source: Job) {
+    setNotice('');
+    if (records.length || savedClips) setConfirmAction({
+      title: 'Replace the current setup draft?', description: 'Copy this evaluation into the setup workspace? The current draft will be replaced. Saved results will not change.',
+      label: 'Replace draft', status: 'Creating editable draft', run: () => reuseEvaluation(source),
+    });
+    else void action('Creating editable draft', () => reuseEvaluation(source));
+  }
   async function deleteEvaluation(entry: History) {
     await api(`/api/jobs/${entry.id}`, undefined, 'DELETE');
     setHistory(previous => previous.filter(h => h.id !== entry.id));
-    if (job?.id === entry.id) { setJob(undefined); setLanguageFilter('all'); }
+    if (job?.id === entry.id) { setJob(undefined); setShowTestList(true); setLanguageFilter('all'); }
+    if (editingTest?.id === entry.id) setEditingTest(undefined);
     setConfirmDelete(undefined);
     setNotice('Evaluation deleted from history. Shared saved audio and your setup draft were kept.');
+  }
+  async function bulkAction() {
+    if (!confirmBulk) throw new Error('Choose tests and a bulk action first.');
+    const { action: operation, entries } = confirmBulk;
+    if (operation === 'redo' && !bulkConsent) throw new Error('Authorize the Azure usage before redoing tests.');
+    const result = await api<BulkTestResult>('/api/jobs/bulk', {
+      action: operation, ids: entries.map(entry => entry.id), ...(operation === 'redo' ? { consent: true } : {}),
+    });
+    const succeeded = new Set(result.succeeded.map(entry => entry.id));
+    setSelectedTestIds(previous => previous.filter(id => !succeeded.has(id)));
+    if (operation === 'delete') {
+      setHistory(previous => previous.filter(entry => !succeeded.has(entry.id)));
+      if (job && succeeded.has(job.id)) { setJob(undefined); setShowTestList(true); setLanguageFilter('all'); }
+      if (editingTest && succeeded.has(editingTest.id)) setEditingTest(undefined);
+    }
+    setBulkReport({ action: operation, result, names: new Map(entries.map(entry => [entry.id, entry.name])) });
+    setConfirmBulk(undefined); setBulkConsent(false);
+    await refresh();
+  }
+  async function openTest(entry: History, regenerate = false) {
+    const value = await api<Job>(`/api/jobs/${entry.id}`);
+    setJob(value); setShowTestList(false); setLanguageFilter('all'); setTab('results'); setEditingTest(undefined);
+    window.scrollTo({ top: 0 });
+    setHistory(previous => previous.map(item => item.id === value.id ? testHistory(value) : item));
+    if (regenerate) setNotice('Reports regenerated locally from the saved assessments. All summaries, evidence and next-take briefs use the current report logic. No audio was resent, no Azure usage was incurred, and the original assessments are unchanged.');
+  }
+  async function downloadReports(entry: History, kind: ReportKind) {
+    const value = await api<Job>(`/api/jobs/${entry.id}`);
+    if (kind === 'json') exportReportJson(value);
+    else if (kind === 'assessments') exportCsv(value);
+    else if (kind === 'voices') exportVoiceEvidenceCsv(value);
+    else exportCoachingCsv(value);
   }
   const filteredJob = job && languageFilter !== 'all' ? {
     ...job,
@@ -454,10 +568,13 @@ export function App() {
   const audioIssues = job?.results.filter(retryableAudioIssue).length ?? 0;
   const rubricChanged = !!job && !!config && job.rubric !== config.rubric;
   const needsReview = job?.results.filter(r => r.assessment && eligibleScore(r.assessment, job.profile) === null).length ?? 0;
-  const startBlockers = evaluationBlockers({
+  const queueBlockers = evaluationBlockers({
     name: testName, profile, config, recordings: records, savedClips, scope: profile.scope, speakerMode: profile.speakerMode, consent,
-    busy: !!busy, running: job?.status === 'running',
+    busy: !!busy, running: false,
   });
+  const startBlockers = [...queueBlockers];
+  if (queue?.active || queue?.waiting.length || job?.status === 'running')
+    startBlockers.push('An evaluation is running or queued. Use Add to queue to schedule this test.');
   const nextUnreviewed = profile.speakerMode !== 'automatic' ? included.find(recording => !recordingReviewed(recording, profile.scope)) : undefined;
   const plannedInputs = savedClips ? savedClips.filter(c => c.include).length : inputCount(included, profile.scope, profile.speakerMode);
 
@@ -466,31 +583,75 @@ export function App() {
       <div className="brand"><span className="brand-icon">v<span>≈</span></span><div>Voices Selection<small>QUALITY WORKBENCH</small></div></div>
       <p className="nav-label">WORKSPACE</p>
       <button className={`nav ${tab === 'setup' ? 'active' : ''}`} disabled={!!busy} title="Start a new test with previous settings and no recordings" onClick={beginNewEvaluation}><span>01</span> Evaluation setup</button>
-      <button className={`nav ${tab === 'results' ? 'active' : ''}`} onClick={() => setTab('results')}><span>02</span> Results & comparison</button>
+      <button className={`nav ${tab === 'results' ? 'active' : ''}`} disabled={!!busy} onClick={() => { setShowTestList(true); setEditingTest(undefined); setTab('results'); }}><span>02</span> Test Reports</button>
       <div className="sidebar-history">
         <p className="nav-label">RECENT EVALUATIONS</p>
         <div className="history-list">
           {!history.length && <p className="muted small">Your evaluations will appear here.</p>}
-          {history.map(h => <button key={h.id} className="history-item" disabled={!!busy} onClick={() => void action('Loading evaluation', async () => {
-            setJob(await api<Job>(`/api/jobs/${h.id}`)); setLanguageFilter('all'); setTab('results');
-          })}>
+          {history.slice(0, 8).map(h => <button key={h.id} className="history-item" disabled={!!busy} onClick={() => void action('Loading evaluation', () => openTest(h))}>
             <strong>{evaluationName(h)}</strong>
             <small>{h.stage === 'audition' ? 'Voice Selection' : 'TTS evaluation'} · {new Date(h.createdAt).toLocaleString()}</small>
             <small>{h.clips} excerpts · {h.status}</small>
           </button>)}
+          {history.length > 8 && <button className="history-item" disabled={!!busy} onClick={() => { setShowTestList(true); setTab('results'); }}>View all {history.length} tests</button>}
         </div>
       </div>
       <div className="sidebar-foot"><span className={`dot ${config?.configured ? 'green' : ''}`} /> {config?.configured ? 'Azure credentials configured' : 'Azure setup required'}<small>Local-first · Audio-only assessment</small></div>
     </aside>
     <main>
-      <header className="topbar"><span>WORKSPACE <b>/</b> {tab === 'setup' ? 'New evaluation' : 'Results'}</span><span className="pill">MULTI-JUDGE PREVIEW</span></header>
+      <header className="topbar"><span>WORKSPACE <b>/</b> {tab === 'setup' ? 'New evaluation' : 'Test Reports'}</span><span className="pill">MULTI-JUDGE PREVIEW</span></header>
       {notice && <div className="notice" role="alert"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice('')}>×</button></div>}
       {busy && <div className="working" role="status"><span className="spinner" /> {busy}</div>}
-      {confirmDelete && <section className="card" role="alertdialog" aria-modal="false" aria-labelledby="delete-evaluation-title">
-        <h2 id="delete-evaluation-title">Delete {evaluationName(confirmDelete)}?</h2>
-        <p>This permanently removes this evaluation and its results from history. Shared saved audio and the current setup draft are kept. This cannot be undone.</p>
+      {queue && <TestQueue state={queue} busy={!!busy}
+        onPause={() => void action('Pausing queue', async () => { setQueue(await api<TestQueueState>('/api/queue/pause', {})); })}
+        onStart={() => { setNotice(''); setConfirmAction({
+          title: 'Start the waiting tests?', description: 'Their saved audio will be sent to the current Azure connection and normal evaluation charges apply.',
+          label: 'Start queue', status: 'Starting queue',
+          run: async () => { setQueue(await api<TestQueueState>('/api/queue/start', { consent: true })); },
+        }); }}
+        onCancel={id => void action('Cancelling test', async () => {
+          await api(`/api/jobs/${id}/cancel`, {});
+          if (job?.id === id) setJob(await api<Job>(`/api/jobs/${id}`));
+          await refresh();
+        })} />}
+      {editingTest && <TestMetadataEditor key={editingTest.id} job={editingTest} busy={!!busy} onCancel={() => setEditingTest(undefined)}
+        onSave={(name, voiceLabels) => void action('Saving test details', async () => {
+          const metadata = testMetadataSchema.parse({ name, voiceLabels });
+          const saved = await api<Job>(`/api/jobs/${editingTest.id}`, metadata, 'PATCH');
+          if (job?.id === saved.id) setJob(saved);
+          setHistory(previous => previous.map(entry => entry.id === saved.id ? testHistory(saved) : entry));
+          setEditingTest(undefined); setNotice('Test name saved. List language and gender were refreshed from the name. Scores, audio and test time are unchanged.');
+        })} />}
+      {confirmDelete && <ConfirmationDialog title={`Delete ${evaluationName(confirmDelete)}?`} description="This permanently removes this evaluation and its results from history. Shared saved audio and the current setup draft are kept. This cannot be undone."
+        busy={!!busy} onCancel={() => setConfirmDelete(undefined)}>
+        {notice && <p className="error-text" role="alert">{notice}</p>}
         <div className="button-row"><button className="secondary danger" disabled={!!busy} onClick={() => void action('Deleting evaluation', () => deleteEvaluation(confirmDelete))}>Confirm deletion</button>
-          <button className="secondary" disabled={!!busy} onClick={() => setConfirmDelete(undefined)}>Keep evaluation</button></div>
+          <button className="secondary" data-dialog-cancel="" disabled={!!busy} onClick={() => setConfirmDelete(undefined)}>Keep evaluation</button></div>
+      </ConfirmationDialog>}
+      {confirmAction && <ConfirmationDialog title={confirmAction.title} description={confirmAction.description} busy={!!busy} onCancel={() => setConfirmAction(undefined)}>
+        {notice && <p className="error-text" role="alert">{notice}</p>}
+        <div className="button-row"><button className="secondary" disabled={!!busy} onClick={() => void action(confirmAction.status, async () => {
+          await confirmAction.run(); setConfirmAction(undefined);
+        })}>{confirmAction.label}</button>
+          <button className="secondary" data-dialog-cancel="" disabled={!!busy} onClick={() => setConfirmAction(undefined)}>Cancel</button></div>
+      </ConfirmationDialog>}
+      {confirmBulk && <ConfirmationDialog title={`${confirmBulk.action === 'delete' ? 'Delete' : 'Redo'} ${confirmBulk.entries.length} selected test${confirmBulk.entries.length === 1 ? '' : 's'}?`}
+        description={confirmBulk.action === 'delete'
+          ? 'Permanently delete these tests and their results? This cannot be undone. Shared saved audio is kept.'
+          : 'Create fresh evaluations from each test’s saved audio, guide, language and judging panel, then run them through the queue. Original results are kept. This sends audio to Azure and incurs new evaluation charges.'}
+        busy={!!busy} onCancel={() => { setConfirmBulk(undefined); setBulkConsent(false); }}>
+        <p className="hint">This includes selected tests on other pages or hidden by filters. Running and queued tests cannot be changed.</p>
+        <ul className="test-bulk-list">{confirmBulk.entries.map(entry => <li key={entry.id}>{entry.name}</li>)}</ul>
+        {confirmBulk.action === 'redo' && <label className="checkbox-label"><input type="checkbox" checked={bulkConsent} disabled={!!busy} onChange={event => setBulkConsent(event.target.checked)} /> I authorize sending these tests’ saved audio to Azure and incurring new evaluation charges.</label>}
+        {notice && <p className="error-text" role="alert">{notice}</p>}
+        <div className="button-row"><button className={`secondary ${confirmBulk.action === 'delete' ? 'danger' : ''}`} disabled={!!busy || (confirmBulk.action === 'redo' && !bulkConsent)}
+          onClick={() => void action('Applying bulk test action', bulkAction)}>{confirmBulk.action === 'delete' ? 'Confirm deletion' : 'Confirm redo and queue'}</button>
+          <button className="text-button" data-dialog-cancel="" disabled={!!busy} onClick={() => { setConfirmBulk(undefined); setBulkConsent(false); }}>Cancel</button></div>
+      </ConfirmationDialog>}
+      {bulkReport && <section className="test-bulk-report" aria-label="Bulk action results">
+        <div><strong role="status">{bulkReport.result.succeeded.length} test{bulkReport.result.succeeded.length === 1 ? '' : 's'} {bulkReport.action === 'delete' ? 'deleted' : 'queued for fresh evaluation'} · {bulkReport.result.failed.length} failed</strong>
+          <button className="text-button" onClick={() => setBulkReport(undefined)}>Dismiss results</button></div>
+        {!!bulkReport.result.failed.length && <ul role="alert">{bulkReport.result.failed.map(item => <li key={item.id}><strong>{bulkReport.names.get(item.id) ?? item.id}:</strong> {item.error}</li>)}</ul>}
       </section>}
       {tab === 'setup' ? <>
         <section className="hero">
@@ -499,7 +660,9 @@ export function App() {
         </section>
         <section className="card test-identity">
           {draftSource && <p className="hint">Editable copy of {draftSource}. Starting creates a new evaluation; the original results stay unchanged.</p>}
-          <label><span>Test name <span className="required-mark" aria-hidden="true">*</span></span><input required maxLength={120} value={testName} disabled={!!busy} onChange={e => setTestName(e.target.value)} placeholder="For example: Voice selection - round 1" /></label>
+          <label><span>Test name <span className="required-mark" aria-hidden="true">*</span></span><input required maxLength={120} value={testName} disabled={!!busy} onChange={e => {
+            const name = e.target.value; setTestName(name); setProfile(previous => withTestNameLanguage(previous, name));
+          }} placeholder="For example: ko-KR Female VTS" /></label>
         </section>
         <div className="setup-grid">
           <section className="card"><SectionTitle step="01" title="Choose your evaluation" description="Different stages deserve different criteria." />
@@ -517,7 +680,7 @@ export function App() {
             }}>
               <option value="single">Single speaker</option><option value="agent">Agent only</option><option value="customer">Customer only</option><option value="both">Both, scored separately</option>
             </select></label><label>Language / accent<input value={profile.language} maxLength={500} disabled={!!busy} onChange={e => setProfile(withLanguageAccent(profile, e.target.value))} placeholder="auto, British English, Italian for Italy..." /></label></div>
-            <p className="hint" role="status">Accent fit: {profile.targetMarket?.trim() ? 'on' : 'off (auto language detection)'}</p>
+            <p className="hint" role="status">Language / accent is filled from a single locale code in the test name; you can override it. Accent fit: {profile.targetMarket?.trim() ? 'on' : 'off (auto language detection)'}</p>
             <div className="button-row"><button className="secondary" disabled={!!busy || !(savedClips?.length ?? records.length)} onClick={() => void action('Applying language hint', async () => applyLanguageToAll())}>Apply to all recordings</button></div>
             <label className="speaker-mode">Speaker selection<select value={profile.speakerMode ?? 'manual'} disabled={!!busy || savedClips !== undefined} onChange={e => setProfile({ ...profile, speakerMode: e.target.value === 'manual' ? 'manual' : 'automatic' })}>
               <option value="automatic">Automatic — infer roles from conversation content</option>
@@ -607,35 +770,47 @@ export function App() {
         <section className="run-card"><div><h3>Ready for a closer listen?</h3><p>{profile.speakerMode === 'automatic' && included.some(r => r.duration === undefined) ? 'At least ' : ''}{plannedInputs} role/audio inputs × {config?.judges.length ?? 0} judges. {profile.scope === 'both' && 'Both roles use separate assessments of the same conversation. '}Azure usage is billed per your deployment; no cost estimate is available.</p>
           <label className="checkbox-label"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /> I have permission to send these audio inputs to my configured Azure resource.</label>
           <small>Automatic mode sends conversation windows; manual mode sends selected excerpts. Missing-audio claims, zero audio-token responses or exhausted format retries may trigger one fresh-session re-upload. Each session allows one format retry, within a total 180-second deadline. Retries incur additional Azure usage and never force scores. Audio inputs, names, ratings and results persist unencrypted on this computer. No transcript is requested or stored.</small>
-          <div id="evaluation-readiness" className={`evaluation-readiness ${startBlockers.length ? '' : 'ready'}`} role="status" aria-live="polite">
-            {startBlockers.length ? <><strong>Before you can start</strong><ul>{startBlockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul></> : <strong>Ready to start — all requirements are complete.</strong>}
+          <div id="evaluation-readiness" className={`evaluation-readiness ${queueBlockers.length ? '' : 'ready'}`} role="status" aria-live="polite">
+            {queueBlockers.length ? <><strong>Before you can start or queue</strong><ul>{queueBlockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul></> : <strong>Ready to start or add to queue.</strong>}
           </div>
           {nextUnreviewed && <button className="secondary" disabled={!!busy} onClick={() => {
             setSelected(nextUnreviewed.id);
             recordingsSection.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
           }}>Review next recording: {nextUnreviewed.file.name}</button>}</div>
-          <button className="primary" disabled={startBlockers.length > 0} title={startBlockers.length ? startBlockers.join(' ') : 'Start the evaluation'} aria-describedby="evaluation-readiness" onClick={() => void action('Preparing evaluation', start)}>Start evaluation <span>→</span></button></section>
+          <div className="run-actions"><button className="primary" disabled={queueBlockers.length > 0} aria-describedby="evaluation-readiness" onClick={() => void action('Preparing queued test', () => start(true))}>Add to queue</button>
+            <button className="secondary" disabled={startBlockers.length > 0} title={startBlockers.length ? startBlockers.join(' ') : 'Start the evaluation'} aria-describedby="evaluation-readiness" onClick={() => void action('Preparing evaluation', () => start())}>Start evaluation <span>→</span></button></div></section>
         <p className="disclaimer">AI opinion scores are not validated MOS. This version does not include a dedicated MOS predictor, automatic diarization or a human listening panel.</p>
       </> : <>
+        <div hidden={!showTestList}><TestLibrary entries={history} busy={!!busy} selectedIds={selectedTestIds} onSelectionChange={setSelectedTestIds}
+          onBulkAction={(operation, entries) => { setConfirmBulk({ action: operation, entries }); setBulkConsent(false); setBulkReport(undefined); setNotice(''); }}
+          onOpen={entry => void action('Loading evaluation', () => openTest(entry))}
+          onEdit={entry => void action('Loading test details', async () => { setEditingTest(await api<Job>(`/api/jobs/${entry.id}`)); })}
+          onDelete={entry => { setConfirmDelete(entry); setNotice(''); }}
+          onDownload={(entry, kind) => void action('Preparing report download', () => downloadReports(entry, kind))}
+          onRegenerate={entry => void action('Regenerating saved reports', () => openTest(entry, true))}
+          onRefresh={() => void action('Refreshing tests', refresh)} /></div>
+        <div hidden={showTestList}>
+        <button className="text-button" disabled={!!busy} onClick={() => setShowTestList(true)}>Back to all tests</button>
         <div className="page-title"><div><p className="eyebrow">EVIDENCE, NOT JUST A LEADERBOARD</p><h1>{job ? evaluationName(job) : 'Voice comparison'}</h1><p className="muted">Voice comparison · Different content and languages can affect results.</p>{job && <p className="hint">{new Date(job.createdAt).toLocaleString()} · ID: {job.id}</p>}</div>
-          <div className="button-row">{job && <><button className="secondary" onClick={() => exportCsv(job)}>Export CSV</button><button className="secondary" onClick={() => exportVoiceEvidenceCsv(job)}>Export voice summaries</button><button className="secondary" onClick={() => download(`voice-evaluation-${job.id}.json`, JSON.stringify({ ...job, name: evaluationName(job), summary: summarize(job), voiceEvidence: summarizeVoiceEvidence(job), improvementGuidance: voiceDirectorBriefs(job) }, null, 2), 'application/json')}>Export JSON</button></>}</div></div>
+          <div className="button-row">{job && <><button className="secondary" onClick={() => exportCsv(job)}>Export CSV</button><button className="secondary" onClick={() => exportVoiceEvidenceCsv(job)}>Export voice summaries</button><button className="secondary" onClick={() => exportReportJson(job)}>Export JSON</button></>}</div></div>
         {!job ? <section className="card empty"><h2>No evaluation selected</h2><p>Start an evaluation or open a previous run from the sidebar.</p><button className="primary" onClick={beginNewEvaluation}>Set up evaluation</button></section> : <>
           <div className="status-strip"><span className={`status-badge ${job.status}`}>{job.status}</span><strong>{job.profile.stage === 'audition' ? 'Voice Selection' : 'TTS evaluation'}</strong><span>{job.profile.scope} · {job.profile.speakerMode === 'automatic' ? 'Automatic roles' : 'Manual ranges'} · {job.judges.length} judges · {job.rubric}</span>
-            <button className="secondary" title="Copy settings and available saved audio into a new editable evaluation" disabled={!!busy || !config} onClick={() => void action('Creating editable draft', () => reuseEvaluation(job))}>Edit</button>
-            <button className="text-button danger" disabled={!!busy || job.status === 'running'} onClick={() => setConfirmDelete({ id: job.id, name: job.name, createdAt: job.createdAt, stage: job.profile.stage, status: job.status, clips: job.clips.length })}>Delete</button>
+            <button className="secondary" title="Copy settings and available saved audio into a new editable evaluation" disabled={!!busy || !config} onClick={() => requestReuseEvaluation(job)}>Edit inputs</button>
+            <button className="secondary" disabled={!!busy || ['running', 'queued'].includes(job.status)} onClick={() => setEditingTest(job)}>Edit test details</button>
+            <button className="text-button danger" disabled={!!busy || ['running', 'queued'].includes(job.status)} onClick={() => { setConfirmDelete(testHistory(job)); setNotice(''); }}>Delete</button>
             <button className="text-button" disabled={!!busy} onClick={() => void action('Refreshing results', async () => { setJob(await api<Job>(`/api/jobs/${job.id}`)); await refresh(); })}>Refresh results</button>
-            {job.status === 'running' ? <button className="text-button danger" disabled={!!busy} onClick={() => void action('Cancelling evaluation', async () => { await api(`/api/jobs/${job.id}/cancel`, {}); setJob(await api<Job>(`/api/jobs/${job.id}`)); })}>Cancel</button> :
-              job.results.some(r => r.status !== 'completed') && <button className="secondary" disabled={!consent || !!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit to create a new evaluation.' : 'Requires Azure audio permission from setup'} onClick={() => void action('Resuming evaluation', async () => {
+            {['running', 'queued'].includes(job.status) ? <button className="text-button danger" disabled={!!busy} onClick={() => void action('Cancelling evaluation', async () => { await api(`/api/jobs/${job.id}/cancel`, {}); setJob(await api<Job>(`/api/jobs/${job.id}`)); await refresh(); })}>Cancel</button> :
+              job.results.some(r => r.status !== 'completed') && <button className="secondary" disabled={!consent || !!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit inputs to create a new evaluation.' : 'Requires Azure audio permission from setup'} onClick={() => void action('Resuming evaluation', async () => {
                 setJob(await api<Job>(`/api/jobs/${job.id}/resume`, { consent })); await refresh();
               })}>Retry incomplete judges</button>}
-            {job.status !== 'running' && audioIssues > 0 && <button className="secondary" disabled={!consent || !!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit to create a new evaluation.' : 'Retry only missing-audio claims'} onClick={() => void action('Retrying suspected audio-input issues', async () => {
+            {!['running', 'queued'].includes(job.status) && audioIssues > 0 && <button className="secondary" disabled={!consent || !!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit inputs to create a new evaluation.' : 'Retry only missing-audio claims'} onClick={() => void action('Retrying suspected audio-input issues', async () => {
               setJob(await api<Job>(`/api/jobs/${job.id}/resume`, { consent, retryAudioIssues: true })); await refresh();
             })}>Retry audio-input issues ({audioIssues})</button>}</div>
-          {job.status !== 'running' && !rubricChanged && (audioIssues > 0 || job.results.some(r => r.status !== 'completed')) && <label className="checkbox-label resume-consent"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /> I authorize resending the selected retry inputs to Azure, including bounded automatic recovery. Retried assessments incur new usage. Previous results are retained in the audit history.</label>}
+          {!['running', 'queued'].includes(job.status) && !rubricChanged && (audioIssues > 0 || job.results.some(r => r.status !== 'completed')) && <label className="checkbox-label resume-consent"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /> I authorize resending the selected retry inputs to Azure, including bounded automatic recovery. Retried assessments incur new usage. Previous results are retained in the audit history.</label>}
           {audioIssues > 0 && !rubricChanged && <div className="callout">{audioIssues} assessments claim missing audio. This is distinct from genuine silence, unsupported language or uncertain roles. Use Retry audio-input issues to recheck only these completed verdicts; other completed assessments are preserved.</div>}
           {job.rubric === RUBRIC_VERSION
             ? <div className="callout"><strong>Voice-persona rubric:</strong> scores concern audible tone, emotion, vocal character and pleasant, effortless listening, not script logic or service-task quality. Meaning is used only for speaker-role attribution.</div>
-            : <div className="callout"><strong>Earlier rubric · {job.rubric}:</strong> these saved scores and comments have not been re-evaluated under the {RUBRIC_VERSION} voice-persona criteria. Use Edit to reuse the saved audio in a new evaluation. Retrying across rubric versions is blocked to avoid mixing judgments.</div>}
+            : <div className="callout"><strong>Earlier rubric · {job.rubric}:</strong> these saved scores and comments have not been re-evaluated under the {RUBRIC_VERSION} voice-persona criteria. Use Edit inputs to reuse the saved audio in a new evaluation. Retrying across rubric versions is blocked to avoid mixing judgments.</div>}
           <p className="hint">Evaluation language hint: {job.profile.language}. Per-input hints are shown with each recording. Target market/accent: {job.profile.targetMarket || 'Not supplied; accent fit is not scored.'}</p>
           <div className="progress-track"><div style={{ width: `${finished / job.results.length * 100}%` }} /></div>
           <div className="metrics"><Metric label="Judge assessments finished" value={`${finished} / ${job.results.length}`} /><Metric label="Failures" value={String(failures)} /><Metric label="Unassessable / partial" value={String(needsReview)} /><Metric label="Recording quality" value={job.profile.stage === 'audition' ? 'Diagnostic only' : 'Included'} /></div>
@@ -700,6 +875,7 @@ export function App() {
               })}</div></details>)}
           </section>
         </>}
+        </div>
       </>}
       <footer>Voices Selection · Audio-only evaluation · Your judgement remains the final one.</footer>
     </main>

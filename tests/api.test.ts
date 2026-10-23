@@ -13,6 +13,56 @@ import { createServer, request as httpRequest } from 'node:http';
 
 const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
 
+test('test library summaries and metadata edits persist without re-evaluating or modifying audio and ratings', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-test-library-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  let calls = 0;
+  const { app, errors, store } = await createApp({
+    dataDir: root, port: address.port,
+    evaluate: async () => { calls++; return { assessment: assessment(), responseFormat: 'function_call' }; },
+  });
+  app.use(errors); server.on('request', app);
+  const url = `http://127.0.0.1:${address.port}/api/jobs`;
+  const original = job([clip({ voice: 'Talent', language: 'Italian' })], [4, 4]);
+  original.name = 'thTH Female VTS';
+  const change = (id: string, body: unknown) => fetch(`${url}/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  try {
+    await store.saveJob(original);
+    const list = await (await fetch(url)).json();
+    assert.equal(list[0].bestScore, 4);
+    assert.deepEqual(list[0].bestVoices, [{ voice: 'Talent', role: 'speaker' }]);
+    assert.deepEqual(list[0].genders, ['Female']);
+    assert.deepEqual(list[0].languages, ['th-TH']);
+    const metadata = { name: 'ja-JP Male VTS', voiceLabels: [{ voice: 'Talent', gender: 'Female' }] };
+    const response = await change(original.id, metadata);
+    assert.equal(response.status, 200);
+    const saved = await response.json();
+    assert.deepEqual(saved, { ...original, ...metadata });
+    assert.deepEqual(await store.read(path.join('jobs', `${original.id}.json`)), saved);
+    const updatedList = await (await fetch(url)).json();
+    assert.equal(updatedList[0].name, metadata.name);
+    assert.deepEqual(updatedList[0].genders, ['Male']);
+    assert.deepEqual(updatedList[0].languages, ['ja-JP']);
+    assert.equal(updatedList[0].createdAt, original.createdAt);
+    for (const invalid of [
+      { ...metadata, results: [] },
+      { ...metadata, name: ' ' },
+      { ...metadata, voiceLabels: [{ voice: 'Not in this test', gender: 'Male' }] },
+      { ...metadata, voiceLabels: [metadata.voiceLabels[0], metadata.voiceLabels[0]] },
+    ]) assert.equal((await change(original.id, invalid)).status, 400);
+    assert.equal((await change(randomUUID(), metadata)).status, 404);
+    assert.equal((await change('not-a-uuid', metadata)).status, 400);
+    assert.deepEqual(await store.read(path.join('jobs', `${original.id}.json`)), saved);
+    assert.equal(calls, 0);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('audio uploads accept maximum-length PCM and reject malformed base64 without overflowing', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-upload-'));
   const server = createServer();
@@ -342,6 +392,7 @@ test('API persists clips, judges and results; validates requests; retries only i
     const copied = await copiedResponse.json() as Job;
     assert.notEqual(copied.id, created.id);
     assert.equal((await request(`/api/jobs/${copied.id}`, {}, 'DELETE')).status, 409);
+    assert.equal((await request(`/api/jobs/${copied.id}`, { name: 'Cannot edit active test', voiceLabels: [] }, 'PATCH')).status, 409);
     release(); hold = undefined;
     const copiedDone = await wait(copied.id);
     assert.equal(copiedDone.results.length, 25);

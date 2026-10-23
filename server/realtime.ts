@@ -35,6 +35,17 @@ export function assessmentTool(profile: Partial<Pick<Profile, 'speakerMode' | 't
       reasons: objectParameters(Object.fromEntries(dimensions.map(d => [d, { type: 'string', maxLength: 1200, description: `Always return a text explanation, never null, including when the corresponding score is null. Explain why an unscored dimension is not applicable or cannot be assessed. Reason in English grounded in audible voice characteristics only. ${voiceDimensionGuidance[d]} Do not summarize the script or praise logical/helpful answers.` }]))),
       observations: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 1500, description: 'Audible voice-characteristic observation in English: tone, timbre, emotion, prosody or listening comfort. Not a summary of what was said or how well a task was completed.' } },
       limitations: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 1500, description: 'Specific audible evidence or coverage limitation in English. Lack of script verification, logical context or business-process knowledge is not a voice-quality limitation.' } },
+      rehearsalCases: {
+        type: 'array', maxItems: 3,
+        description: 'Up to three concrete next-take cases for THIS target voice in THIS excerpt. Use [] when no specific adjustment is supported. Never invent a flaw to fill the list.',
+        items: objectParameters({
+          dimension: { type: 'string', enum: [...dimensions] },
+          cue: { type: 'string', minLength: 1, maxLength: 300, description: 'Locate the exact audible moment, e.g. the end of the second target-speaker turn or the first breath group. No invented timestamps or transcript.' },
+          observation: { type: 'string', minLength: 1, maxLength: 600, description: 'What is audibly happening at that moment and its effect on listening comfort. Specific to this performance, not a category definition.' },
+          direction: { type: 'string', minLength: 1, maxLength: 600, description: 'Address the talent directly with ONE executable vocal adjustment at that cue. Specify the change in phrasing, stress, pitch, breath or sound; do not merely say improve pace or add warmth. Keep the script unchanged.' },
+          check: { type: 'string', minLength: 1, maxLength: 400, description: 'An audible success criterion for replaying this exact moment, not a promised score improvement.' },
+        }),
+      },
     }),
   };
 }
@@ -55,6 +66,7 @@ The same vocal delivery must not receive a better score simply because its scrip
 Warmth, empathy and emotion must be audible in tone and prosody; saying reassuring words is not evidence of a warm voice. A calm, understated persona can be excellent without exaggerated emotion.
 Use conversational meaning ONLY when needed for automatic agent/customer role attribution, never as a performance criterion. Once the target role is identified, assess its audible voice characteristics independently of its actions or script.
 Reasons and observations must describe audible vocal traits and their effect on listening comfort. Do not summarize service actions or write content-based praise such as "provides clear instructions", "answers logically" or "confirms account details". Content-based role evidence belongs only in speakerAttribution.evidence and must not influence scores.
+DIRECTOR CASES: Return rehearsalCases in English, grounded only in this target speaker's audible performance. Each case must locate a particular moment with a precise listening cue, describe the audible issue, give the talent one concrete change, and define what to listen for after recording. Avoid reusable advice such as "speak naturally" or "vary your tone". Do not invent quotes, timestamps, scenarios, flaws or accent targets. Use only scored, active dimensions (audioQuality only for TTS). If speech or role attribution is insufficient, or no specific adjustment is supported, return []. A strong voice may still have a supported local adjustment; do not require a comparison with another performer.
 Report language: English ONLY, regardless of the recording's language, language hint, or target style.
 Write ALL reasons, observations, limitations, and speakerAttribution.evidence (when present) in English.
 The language field must name the actual detected AUDIO language in English (for example, "Italian" or "Japanese"), or "unknown"; do not label non-English audio as English.

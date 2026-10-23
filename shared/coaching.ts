@@ -1,6 +1,6 @@
 import {
-  activeDimensions, summarize, summarizeVoiceEvidence, RUBRIC_VERSION,
-  type Dimension, type EvidenceNote, type Job, type StoredClip,
+  activeDimensions, eligibleScore, evaluationName, summarize, summarizeVoiceEvidence, RUBRIC_VERSION,
+  type Assessment, type Dimension, type EvidenceNote, type Job, type StoredClip,
 } from './domain.js';
 
 const exercises: Record<Dimension, { title: string; direction: string; keep: string; steps: string[]; check: string }> = {
@@ -76,24 +76,76 @@ const exercises: Record<Dimension, { title: string; direction: string; keep: str
   },
 };
 
+type DirectorCase = NonNullable<Assessment['rehearsalCases']>[number] & {
+  recording: string; start: number; end: number;
+};
+type DirectorFeedback = { recording: string; start: number; end: number; observation: string };
 export type VoiceDirectorBrief = {
   voice: string; role: string; status: 'ready' | 'maintain' | 'insufficient_feedback';
   summary: string; keep: string[]; deliveryTarget?: string; targetMarket?: string;
-  focus: { dimension: Dimension; title: string; direction: string; steps: string[]; check: string }[];
+  focus: { dimension: Dimension; title: string; direction: string; steps: string[]; check: string;
+    cases: DirectorCase[]; feedback: DirectorFeedback[] }[];
   takePlan: string[]; checklist: string[]; notes: string[];
 };
 
+function directorSources(job: Job, voice: string, role: string) {
+  const forbidden = [
+    ...job.judges.flatMap(j => [j.id, j.name, j.deployment]),
+    ...job.clips.filter(c => c.voice !== voice).map(c => c.voice),
+    ...job.clips.map(c => c.file).filter(file => /[\\/]/.test(file)),
+  ].filter(Boolean);
+  const talentSafe = (text: string) => !forbidden.some(term => text.toLowerCase().includes(term.toLowerCase())) &&
+    !/\b(judge|benchmark|reference|compared|ranking|score)\b/i.test(text) && !/[\\/]/.test(text);
+  const entries: { clip: StoredClip; assessment: Assessment }[] = [];
+  for (const clip of job.clips.filter(c => c.voice === voice && c.role === role)) {
+    const fileClips = job.clips.filter(c => c.voice === voice && c.role === role && c.file === clip.file);
+    if (!summarize({ ...job, clips: fileClips })[0]?.eligibleFiles) continue;
+    for (const judge of job.judges) {
+      const result = job.results.find(r => r.clipId === clip.id && r.judgeId === judge.id);
+      if (result?.status === 'completed' && result.assessment && eligibleScore(result.assessment, job.profile) !== null)
+        entries.push({ clip, assessment: result.assessment });
+    }
+  }
+  const unique = <T,>(values: T[]): T[] => [...new Map(values.map(value => [JSON.stringify(value), value])).values()];
+  return activeDimensions(job.profile).map(dimension => ({
+    dimension,
+    cases: unique(entries.flatMap(({ clip, assessment }) => (assessment.rehearsalCases ?? [])
+      .filter(item => item.dimension === dimension && Object.values(item).every(talentSafe))
+      .map(item => ({ ...item, recording: clip.file.split(/[\\/]/).at(-1)!, start: clip.start, end: clip.end })))),
+    feedback: unique(entries.flatMap(({ clip, assessment }) => {
+      const observation = assessment.reasons[dimension].trim();
+      return observation && talentSafe(observation)
+        ? [{ recording: clip.file.split(/[\\/]/).at(-1)!, start: clip.start, end: clip.end, observation }] : [];
+    })),
+  }));
+}
+
 export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
   const summaries = summarize(job);
-  return voiceCoaching(job).map(comparison => {
-    const own = summaries.find(s => s.voice === comparison.voice && s.role === comparison.role);
-    if (!own) throw new Error('Cannot prepare a director brief without the voice summary.');
-    const enoughFeedback = own.eligibleFiles > 0 && comparison.matchedFiles.length > 0;
-    const focus = enoughFeedback ? comparison.priorities.slice(0, 3).map(priority => {
-      const exercise = exercises[priority.dimension];
+  return summaries.map(own => {
+    const enoughFeedback = own.eligibleFiles > 0;
+    const sources = directorSources(job, own.voice, own.role);
+    const priorities = sources.filter(source => source.cases.length || (own.dimensions[source.dimension] ?? 5) < 4)
+      .sort((a, b) => Number(b.cases.length > 0) - Number(a.cases.length > 0) ||
+        (own.dimensions[a.dimension] ?? 5) - (own.dimensions[b.dimension] ?? 5));
+    const focus = enoughFeedback ? priorities.slice(0, 3).map(source => {
+      const exercise = exercises[source.dimension];
+      const first = source.cases[0];
       return {
-        dimension: priority.dimension, title: exercise.title, direction: exercise.direction,
-        steps: [...exercise.steps], check: exercise.check,
+        dimension: source.dimension, title: exercise.title,
+        direction: first ? `In ${first.recording} (${first.start}-${first.end}s), at ${first.cue}: ${first.direction}`
+          : source.feedback.length
+            ? `In ${source.feedback[0].recording} (${source.feedback[0].start}-${source.feedback[0].end}s), the feedback reports: ${source.feedback[0].observation} Replay this excerpt and locate the moment before choosing an adjustment; the saved review contains no exact direction.`
+            : 'The saved review contains no usable recording-specific direction for this area. Request a new evaluation before prescribing an exact change.',
+        steps: first ? [
+          `Replay ${first.recording} at ${first.cue}. Listen for: ${first.observation}`,
+          `Re-record that same passage: ${first.direction}`,
+        ] : [
+          'Replay the identified excerpt and confirm whether the reported trait is audible. Do not assume it occurs throughout the recording.',
+          'For an exact cue and performance adjustment, run a new evaluation. Do not invent a line or a delivery problem from the rating alone.',
+        ],
+        check: first?.check ?? 'Identify a specific audible moment before asking for a different delivery.',
+        cases: source.cases, feedback: source.cases.length ? [] : source.feedback,
       };
     }) : [];
     const keep = enoughFeedback ? activeDimensions(job.profile)
@@ -105,27 +157,26 @@ export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
       notes.push('This feedback uses earlier evaluation criteria. Newer style or accent criteria have not been applied to this recording.');
     if (job.status === 'running')
       notes.push('The listening review is still in progress. Treat this brief as provisional.');
-    if (own.eligibleFiles < own.files || comparison.warnings.some(w =>
-      /coverage is incomplete|shared, full-panel eligible recording pairs|language sets were excluded|ambiguous/.test(w)))
+    if (own.eligibleFiles < own.files)
       notes.push('Only part of the recording set supports this brief. Check each suggested change by listening back; do not treat it as a finding about every line.');
     const status = !enoughFeedback ? 'insufficient_feedback' : focus.length ? 'ready' : 'maintain';
     return {
-      voice: comparison.voice, role: comparison.role, status,
-      summary: !enoughFeedback
+      voice: own.voice, role: own.role, status,
+      summary: `${own.voice}, for "${evaluationName(job)}": ` + (!enoughFeedback
         ? 'For your next take, give me a consistent reading of the same passage in your usual delivery. There is not enough reliable listening feedback to ask you for a specific adjustment yet, so do not force a different voice or add extra emotion. Keep the words unchanged and aim for a comfortable, believable performance.'
         : focus.length
-          ? `For your next take, I'd like you to focus first on ${focus[0].title.toLowerCase()}. ${focus.map(item => item.direction).join(' ')} ${keep.length ? `${keep[0]} ` : ''}Keep the words unchanged and work on one adjustment at a time. I am looking for a comfortable, believable performance, not a bigger or more theatrical one.`
-          : `For your next take, I'd like you to concentrate on consistency. ${keep.length ? `${keep[0]} ` : ''}Repeat the same passage with that same vocal approach from beginning to end. I am not asking you to add effects or force a different delivery; there is no specific adjustment supported by the feedback. Keep the words unchanged and aim for an easy, believable read.`,
+          ? `For your next take, I'd like you to focus first on ${focus[0].title.toLowerCase()}. ${focus.map(item => item.direction).join(' ')} ${keep.length ? `${keep[0]} ` : ''}Keep the words unchanged and work on one adjustment at a time.`
+          : `For your next take, I'd like you to concentrate on consistency. ${keep.length ? `${keep[0]} ` : ''}Repeat the same passage with that same vocal approach from beginning to end. I am not asking you to add effects or force a different delivery; there is no specific adjustment supported by the feedback. Keep the words unchanged and aim for an easy, believable read.`),
       keep, focus,
       ...(job.profile.target.trim() ? { deliveryTarget: job.profile.target.trim() } : {}),
       ...(job.profile.targetMarket?.trim() ? { targetMarket: job.profile.targetMarket.trim() } : {}),
       takePlan: [
         'Take 1 - baseline: read the same passage in your normal delivery. Keep the words, recording position and playback level consistent.',
         focus.length
-          ? `Take 2 - directed: work only on "${focus[0].title}". Keep every other performance choice as close to Take 1 as possible.`
+          ? `Take 2 - ${focus[0].cases.length ? 'directed' : 'locate the cue'}: "${focus[0].title}". ${focus[0].direction}`
           : 'Take 2 - consistency: repeat the passage with the same intended vocal style. Do not invent a new performance choice just to sound different.',
         focus.length
-          ? 'Take 3 - alternative: try a smaller or larger version of that same choice, without simply increasing volume. Listen back at matched loudness and keep the most comfortable, believable take.'
+          ? `Take 3 - confirmation: ${focus[0].cases.length ? `repeat the same adjustment. Listen for: ${focus[0].check}` : 'confirm the moment with a listener or request a new evaluation before changing the performance.'}`
           : 'Take 3 - confirmation: repeat the passage after a short pause. Listen back at matched loudness and check that the delivery stays comfortable and consistent from start to end.',
       ],
       checklist: [
@@ -151,8 +202,14 @@ export function formatDirectorBrief(brief: VoiceDirectorBrief): string {
   if (brief.targetMarket) lines.push('', 'MARKET / ACCENT TARGET', brief.targetMarket);
   if (brief.focus.length) {
     lines.push('', 'PERFORMANCE DIRECTIONS');
-    for (const [index, focus] of brief.focus.entries())
+    for (const [index, focus] of brief.focus.entries()) {
       lines.push(`${index + 1}. ${focus.title}`, focus.direction, ...focus.steps.map(step => `- ${step}`), `Listen for: ${focus.check}`, '');
+      for (const item of focus.cases)
+        lines.push(`CASE: ${item.recording} (${item.start}-${item.end}s)`, `Find: ${item.cue}`,
+          `Heard: ${item.observation}`, `Do: ${item.direction}`, `Pass check: ${item.check}`, '');
+      for (const item of focus.feedback)
+        lines.push(`SAVED FEEDBACK: ${item.recording} (${item.start}-${item.end}s)`, item.observation, '');
+    }
   }
   lines.push('', 'YOUR NEXT THREE TAKES', ...brief.takePlan.map(line => `- ${line}`),
     '', 'BEFORE YOU SEND', ...brief.checklist.map(line => `- ${line}`),

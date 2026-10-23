@@ -1,5 +1,13 @@
 import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, MAX_SECONDS, type DraftClip, type Profile, type Settings } from '../shared/domain';
 import type { Recording } from './audio';
+import { testNameMetadata } from '../shared/history';
+
+export const DEFAULT_TEST_GUIDE = 'This test evaluates the quality of a service agent’s voice in a call center context. You will hear recorded conversations between a customer and an agent. **Evaluate only the agent’s voice** and compare it with how a natural, authentic call center agent typically sounds in real-world interactions. **Do not evaluate or score the customer’s voice or speaking behavior.** All ratings and comments must focus exclusively on the agent, and your comments should be **as detailed and specific as possible**, describing the agent’s voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
+
+export function withTestNameLanguage(profile: Profile, name: string): Profile {
+  const { languages } = testNameMetadata(name);
+  return withLanguageAccent(profile, languages.length === 1 ? languages[0] : 'auto');
+}
 
 type Reviewable = Pick<Recording, 'regions' | 'duration'>;
 export function withLanguageAccent(profile: Profile, value = profile.targetMarket?.trim() || profile.language): Profile {

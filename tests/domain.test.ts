@@ -7,6 +7,109 @@ import { validateRegion } from '../src/audio.js';
 import { assessment, clip, job, profile } from './fixtures.js';
 import { voiceCoaching, voiceDirectorBriefs, formatDirectorBrief } from '../shared/coaching.js';
 
+test('director cases give different voices exact cues and adjustments even with identical ratings', () => {
+  const value = job([
+    clip({ voice: 'Talent A', file: 'private-a/reading.wav', start: 10, end: 30 }),
+    clip({ voice: 'Talent B', file: 'private-b/reading.wav', start: 40, end: 60 }),
+  ], [4, 4]);
+  value.rubric = RUBRIC_VERSION;
+  value.name = 'Calm service audition';
+  const cases = [
+    { dimension: 'pace' as const, cue: 'the end of the second breath group',
+      observation: 'The final syllables bunch together and become harder to catch.',
+      direction: 'Keep the opening speed; release the final two syllables before taking your breath.',
+      check: 'The ending remains distinct without slowing the whole phrase.' },
+    { dimension: 'pace' as const, cue: 'the pause before the final phrase',
+      observation: 'The extended silence breaks the thought into two disconnected pieces.',
+      direction: 'Shorten that pause to one comfortable breath and connect the next phrase.',
+      check: 'The thought stays connected without losing the breath boundary.' },
+  ];
+  for (const result of value.results)
+    result.assessment!.rehearsalCases = [cases[result.clipId === value.clips[0].id ? 0 : 1]];
+  const snapshot = JSON.stringify(value);
+  const [a, b] = voiceDirectorBriefs(value);
+  for (const [index, brief] of [a, b].entries()) {
+    assert.equal(brief.status, 'ready');
+    assert.equal(brief.focus.length, 1);
+    assert.equal(brief.focus[0].cases.length, 1, 'identical panel cases are deduplicated');
+    assert.ok(brief.summary.includes(value.name));
+    assert.ok(brief.summary.includes(cases[index].direction));
+    assert.ok(brief.takePlan[1].includes(cases[index].cue));
+    assert.ok(brief.takePlan[2].includes(cases[index].check));
+    const text = formatDirectorBrief(brief);
+    const { cue, observation, direction, check } = cases[index];
+    for (const part of [cue, observation, direction, check]) assert.ok(text.includes(part));
+    assert.ok(!text.includes(cases[1 - index].direction));
+    assert.ok(!text.includes('private-a'));
+    assert.ok(!text.includes('private-b'));
+    assert.deepEqual(brief.focus[0].feedback, []);
+  }
+  assert.match(formatDirectorBrief(a), /reading.wav \(10-30s\)/);
+  assert.match(formatDirectorBrief(b), /reading.wav \(40-60s\)/);
+  assert.equal(JSON.stringify(value), snapshot);
+});
+
+test('director uses the voice own weak ratings without needing a lower-ranked comparison', () => {
+  const value = job(undefined, [3, 3]);
+  value.rubric = RUBRIC_VERSION;
+  value.results[0].assessment!.reasons.pace = 'The last phrase is rushed.';
+  value.results[1].assessment!.reasons.pace = 'The last phrase is rushed.';
+  const brief = voiceDirectorBriefs(value)[0];
+  assert.equal(brief.status, 'ready');
+  const focus = brief.focus.find(item => item.dimension === 'pace')!;
+  assert.deepEqual(focus.cases, []);
+  assert.equal(focus.feedback.length, 1);
+  assert.match(focus.direction, /last phrase is rushed/);
+  assert.match(focus.direction, /no exact direction/);
+  assert.match(formatDirectorBrief(brief), /SAVED FEEDBACK: one.wav/);
+});
+
+test('director excludes failed panel coverage, other roles and comparison metadata from cases', () => {
+  const value = job([
+    clip({ voice: 'Talent', file: 'private/good.wav' }),
+    clip({ voice: 'Talent', file: 'private/failed.wav' }),
+    clip({ voice: 'Talent', file: 'private/customer.wav', role: 'customer' }),
+  ], [4, 4]);
+  const rehearsalCase = {
+    dimension: 'pace' as const, cue: 'the first breath group', observation: 'A long pause breaks the flow.',
+    direction: 'Connect the first two phrases on one comfortable breath.', check: 'The phrases flow without a gap.',
+  };
+  for (const result of value.results) result.assessment!.rehearsalCases = [{
+    ...rehearsalCase,
+    cue: result.clipId === value.clips[1].id ? 'EXCLUDED failed clip' :
+      result.clipId === value.clips[2].id ? 'EXCLUDED customer role' : rehearsalCase.cue,
+  }];
+  value.results.find(result => result.clipId === value.clips[1].id)!.status = 'failed';
+  value.results[1].assessment!.rehearsalCases!.push({
+    ...rehearsalCase, direction: `Copy ${value.judges[0].name} from ${value.judges[0].deployment}.`,
+  });
+  const brief = voiceDirectorBriefs(value).find(item => item.role === 'speaker')!;
+  const text = formatDirectorBrief(brief);
+  assert.equal(brief.focus[0].cases.length, 1);
+  assert.ok(!text.includes('EXCLUDED'));
+  assert.ok(!text.includes(value.judges[0].name));
+  assert.ok(!text.includes(value.judges[0].deployment));
+});
+
+test('case normalization preserves old assessments and removes inactive or unassessable directions', () => {
+  assert.equal(normalizeAssessment(assessment(), profile).rehearsalCases, undefined);
+  const value = assessment();
+  const rehearsalCase = { cue: 'the opening', observation: 'A specific audible trait.',
+    direction: 'An exact vocal adjustment.', check: 'An audible check.' };
+  value.rehearsalCases = (['pace', 'accentFit', 'contextFit'] as const).map(dimension => ({
+    ...rehearsalCase, dimension,
+  }));
+  assert.deepEqual(normalizeAssessment(value, profile).rehearsalCases?.map(item => item.dimension), ['pace']);
+  value.rehearsalCases = [{ ...rehearsalCase, dimension: 'audioQuality' }];
+  assert.deepEqual(normalizeAssessment(value, profile).rehearsalCases, []);
+  value.rehearsalCases = [{ ...rehearsalCase, dimension: 'pace' }];
+  value.assessable = false;
+  assert.deepEqual(normalizeAssessment(value, profile).rehearsalCases, []);
+  value.assessable = true;
+  value.rehearsalCases[0].cue = '';
+  assert.throws(() => normalizeAssessment(value, profile));
+});
+
 test('director briefs turn supported priorities into a concise next-take plan without exposing comparison metadata', () => {
   const value = job([
     clip({ voice: 'PrivateBenchmark', file: 'private-benchmark-path/one.wav' }),

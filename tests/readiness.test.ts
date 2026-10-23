@@ -1,12 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { applyLanguageHint, evaluationBlockers, recordingReviewed, withLanguageAccent } from '../src/readiness.js';
+import { applyLanguageHint, evaluationBlockers, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE } from '../src/readiness.js';
 import { activeDimensions, profileSchema } from '../shared/domain.js';
 import type { Region } from '../src/audio.js';
 import { clip, profile as baseProfile } from './fixtures.js';
 
 const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
+
+test('test-name locales populate listening language and accent fit without changing the guide or scope', () => {
+  const original = { ...profile, scope: 'agent' as const, target: DEFAULT_TEST_GUIDE };
+  for (const [name, expected] of [
+    ['ko-KR Female VTS', 'ko-KR'], ['thTH Male Cartesia', 'th-TH'],
+    ['zh_Hant_TW Female', 'zh-Hant-TW'], ['en-GB Male', 'en-GB'],
+    ['No locale', 'auto'], ['en-US and ko-KR', 'auto'],
+  ]) {
+    const next = withTestNameLanguage(original, name);
+    assert.equal(next.language, expected);
+    assert.equal(next.targetMarket, expected === 'auto' ? '' : expected);
+    assert.equal(next.target, DEFAULT_TEST_GUIDE);
+    assert.equal(next.scope, 'agent');
+  }
+  const override = withLanguageAccent(withTestNameLanguage(original, 'ko-KR Female'), 'Italian for Italy');
+  assert.equal(override.language, 'Italian for Italy');
+  assert.equal(original.language, 'auto');
+  assert.ok(profileSchema.safeParse({ ...original, language: 'ko-KR' }).success);
+  assert.match(DEFAULT_TEST_GUIDE, /\*\*Evaluate only the agent’s voice\*\*/);
+  assert.match(DEFAULT_TEST_GUIDE, /\*\*Do not evaluate or score the customer’s voice or speaking behavior\.\*\*/);
+});
 
 function region(role: Region['role'] = 'speaker', confirmed = true): Region {
   return { id: randomUUID(), role, confirmed, start: 0, end: 1, channel: 'mix' };

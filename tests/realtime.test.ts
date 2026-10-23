@@ -140,6 +140,13 @@ test('assessment tool requires every field and dimension, constrains scores and 
   assert.match(manual.parameters.properties.languageSupported.description, /listening hint as context, not proof/);
   assert.ok(automatic.parameters.required.includes('speakerAttribution'));
   assert.deepEqual(automatic.parameters.properties.speakerAttribution?.properties.role.enum, ['customer']);
+  const cases = manual.parameters.properties.rehearsalCases;
+  assert.equal(cases.maxItems, 3);
+  assert.deepEqual(cases.items.required, ['dimension', 'cue', 'observation', 'direction', 'check']);
+  assert.equal(cases.items.additionalProperties, false);
+  assert.match(cases.items.properties.direction.description, /ONE executable vocal adjustment/);
+  assert.match(instructions(profile), /Avoid reusable advice/);
+  assert.match(instructions(profile), /no specific adjustment is supported, return \[\]/);
 });
 test('target presence is explicit and data-trust boundaries do not disable style assessment', () => {
   for (const speakerMode of ['automatic', 'manual'] as const) {

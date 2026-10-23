@@ -84,6 +84,13 @@ export function clipScopeError(scope: Profile['scope'], clips: Clip[]): string |
     }
   }
 }
+export const rehearsalCaseSchema = z.object({
+  dimension: z.enum(dimensions),
+  cue: z.string().trim().min(1).max(300),
+  observation: z.string().trim().min(1).max(600),
+  direction: z.string().trim().min(1).max(600),
+  check: z.string().trim().min(1).max(400),
+}).strict();
 export const assessmentSchema = z.object({
   language: z.string().min(1).max(100),
   languageSupported: z.boolean(),
@@ -109,6 +116,7 @@ export const assessmentSchema = z.object({
   }).strict(),
   observations: z.array(z.string().max(1500)).max(12),
   limitations: z.array(z.string().max(1500)).max(12),
+  rehearsalCases: z.array(rehearsalCaseSchema).max(3).optional(),
 }).strict();
 export type Assessment = z.infer<typeof assessmentSchema>;
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
@@ -136,10 +144,19 @@ export type JudgeResult = JudgeEvaluation & {
   previousEvaluations?: (JudgeEvaluation & { retriedAt: string })[];
 };
 export const testNameSchema = z.string().trim().min(1, 'Enter a test name.').max(120, 'Use at most 120 characters for the test name.');
+export const voiceGenders = ['Female', 'Male', 'Other', 'Unspecified'] as const;
+export type VoiceGender = typeof voiceGenders[number];
+export type VoiceLabel = { voice: string; gender: VoiceGender };
 export type Job = {
-  id: string; name?: string; createdAt: string; status: 'running' | 'completed' | 'cancelled' | 'interrupted';
+  id: string; name?: string; createdAt: string; status: 'queued' | 'running' | 'completed' | 'cancelled' | 'interrupted';
   profile: Profile; judges: Judge[]; clips: StoredClip[]; results: JudgeResult[];
   rubric: string;
+  voiceLabels?: VoiceLabel[];
+  queueOrder?: number;
+};
+export type TestQueueState = {
+  paused: boolean; active?: { id: string; name: string };
+  waiting: { id: string; name: string }[]; error?: string;
 };
 export function evaluationName(value: { name?: string }): string {
   return value.name?.trim() || 'Untitled evaluation';
@@ -199,6 +216,9 @@ export function normalizeAssessment(value: unknown, profile: Profile, role?: Cli
   if (!assessment.assessable || !assessment.languageSupported) {
     for (const d of dimensions) if (d !== 'audioQuality') assessment.scores[d] = null;
   }
+  if (assessment.rehearsalCases) assessment.rehearsalCases = assessment.rehearsalCases.filter(item =>
+    assessment.assessable && assessment.languageSupported &&
+    activeDimensions(profile).includes(item.dimension) && assessment.scores[item.dimension] !== null);
   return assessment;
 }
 
