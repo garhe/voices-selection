@@ -4,7 +4,7 @@ import {
   dimensions, dimensionLabel, dimensionWeight, profileRubric, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, retryableAudioIssue, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, languageHintSchema, resolveLanguageHint, rolesForScope,
 } from '../shared/domain';
 import { automaticRegions, base64, browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
-import { applyLanguageHint, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric, DEFAULT_TEST_GUIDE } from './readiness';
+import { applyLanguageHint, defaultTestGuide, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric, DEFAULT_TEST_GUIDE } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
 import { canManageTest, testHistory, testMetadataSchema, testNameMetadata, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
 import { TestLibrary, TestMetadataEditor, type ReportKind } from './TestLibrary';
@@ -12,6 +12,7 @@ import { TestQueue } from './TestQueue';
 import { ConfirmationDialog } from './ConfirmationDialog';
 import { ThemePicker } from './ThemePicker';
 import { RubricEditor } from './RubricEditor';
+import { startPolling } from './polling';
 
 type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string };
 type History = TestHistory;
@@ -30,8 +31,8 @@ async function api<T>(url: string, body?: unknown, method = 'POST', signal?: Abo
   }
   return response.json() as Promise<T>;
 }
-async function loadHistory(): Promise<History[]> {
-  const entries = await api<History[]>('/api/jobs');
+async function loadHistory(signal?: AbortSignal): Promise<History[]> {
+  const entries = await api<History[]>('/api/jobs', undefined, 'GET', signal);
   if (entries.some(entry => !Array.isArray(entry.languages) || !Array.isArray(entry.voices) || !Array.isArray(entry.genders)))
     throw new Error('The server is using an older test-list format. Restart Voices Selection, then refresh this page.');
   return entries.map(entry => ({ ...entry, ...testNameMetadata(entry.name) }));
@@ -319,6 +320,8 @@ export function App() {
   const [showTestList, setShowTestList] = useState(true);
   const [editingTest, setEditingTest] = useState<Job>();
   const [notice, setNotice] = useState('');
+  const [connectionError, setConnectionError] = useState('');
+  const [progressError, setProgressError] = useState('');
   const [busy, setBusy] = useState('');
   const [consent, setConsent] = useState(false);
   const [languageFilter, setLanguageFilter] = useState('all');
@@ -343,9 +346,6 @@ export function App() {
     if (configuration.runtimeError) setNotice(configuration.runtimeError);
   }
   useEffect(() => {
-    void refresh().catch(error => setNotice(errorText(error)));
-  }, []);
-  useEffect(() => {
     const eligible = new Set(history.filter(canManageTest).map(entry => entry.id));
     setSelectedTestIds(previous => {
       const next = previous.filter(id => eligible.has(id));
@@ -353,18 +353,21 @@ export function App() {
     });
   }, [history]);
   useEffect(() => {
-    let stopped = false, pending = false;
-    const controller = new AbortController();
-    const timer = setInterval(() => {
-      if (stopped || pending) return;
-      pending = true;
-      void Promise.all([api<TestQueueState>('/api/queue', undefined, 'GET', controller.signal), loadHistory()]).then(([state, list]) => {
-        if (!stopped) { setQueue(state); setHistory(list); }
-      }).catch(error => {
-        if (!stopped) { setNotice(`Queue polling stopped: ${errorText(error)}. Refresh the page to reconnect.`); stopped = true; }
-      }).finally(() => { pending = false; });
-    }, 2000);
-    return () => { stopped = true; controller.abort(); clearInterval(timer); };
+    let initialized = false;
+    return startPolling(async signal => {
+      const [state, list, configuration, presets] = await Promise.all([
+        api<TestQueueState>('/api/queue', undefined, 'GET', signal), loadHistory(signal),
+        initialized ? undefined : api<Config>('/api/config', undefined, 'GET', signal),
+        initialized ? undefined : api<Rubric[]>('/api/rubrics', undefined, 'GET', signal),
+      ]);
+      return { state, list, configuration, presets };
+    }, ({ state, list, configuration, presets }) => {
+      if (configuration && presets) {
+        setConfig(configuration); setRubrics(presets); initialized = true;
+        if (configuration.runtimeError) setNotice(configuration.runtimeError);
+      }
+      setQueue(state); setHistory(list); setConnectionError('');
+    }, error => setConnectionError(`Local app connection interrupted: ${errorText(error)}. Reconnecting automatically; your draft is kept.`));
   }, []);
   useEffect(() => {
     if (!currentFile) { setBuffer(undefined); setSourceUrl(''); setPreviewUrl(''); return; }
@@ -382,25 +385,13 @@ export function App() {
   }, [currentFile, selected, profile.scope]);
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
   useEffect(() => {
+    setProgressError('');
     if (!job || !['running', 'queued'].includes(job.status)) return;
-    let stopped = false, pending = false;
-    const controller = new AbortController();
-    const timer = setInterval(() => {
-      if (stopped || pending) return;
-      pending = true;
-      void api<Job>(`/api/jobs/${job.id}`, undefined, 'GET', controller.signal).then(value => {
-        if (!stopped) {
-          setJob(value);
-          setHistory(previous => previous.map(entry => entry.id === value.id ? testHistory(value) : entry));
-        }
-      }).catch(error => {
-        if (!stopped) { setNotice(`Progress polling stopped: ${errorText(error)}. Use Refresh results.`); stopped = true; }
-      }).finally(() => { pending = false; });
-    }, 1500);
-    return () => { stopped = true; controller.abort(); clearInterval(timer); };
-  }, [job?.id, job?.status]);
-  useEffect(() => {
-    if (job && job.status !== 'running') void loadHistory().then(setHistory).catch(error => setNotice(errorText(error)));
+    return startPolling(signal => api<Job>(`/api/jobs/${job.id}`, undefined, 'GET', signal), value => {
+      setJob(value);
+      setHistory(previous => previous.map(entry => entry.id === value.id ? testHistory(value) : entry));
+      setProgressError('');
+    }, error => setProgressError(`Results connection interrupted: ${errorText(error)}. Reconnecting automatically.`), 1500);
   }, [job?.id, job?.status]);
   function defaultRegions(scope: Profile['scope'], duration: number): Region[] {
     const roles = rolesForScope(scope);
@@ -411,7 +402,8 @@ export function App() {
   }
   function beginNewEvaluation() {
     if (tab === 'setup') return;
-    setProfile(withTestNameLanguage({ ...(job?.profile ?? profile), target: DEFAULT_TEST_GUIDE }, ''));
+    const source = job?.profile ?? profile;
+    setProfile(withTestNameLanguage({ ...source, target: defaultTestGuide(source) }, ''));
     if (job) setConfig(previous => previous ? { ...previous, judges: job.judges.map(judge => ({ ...judge })) } : previous);
     setTestName(''); setRecords([]); setSavedClips(undefined); setDraftSource(undefined);
     setSelected(undefined); setBuffer(undefined); setSourceUrl(''); setPreviewUrl('');
@@ -494,7 +486,7 @@ export function App() {
     });
     if (enqueue) {
       setTestName(''); setRecords([]); setSelected(undefined); setSavedClips(undefined); setDraftSource(undefined); setConsent(false);
-      setProfile(previous => withTestNameLanguage({ ...previous, target: DEFAULT_TEST_GUIDE }, ''));
+      setProfile(previous => withTestNameLanguage({ ...previous, target: defaultTestGuide(previous) }, ''));
       setNotice(`"${name}" added to the queue. Prepare the next test; saved tests run one at a time, even if this browser is closed. Keep the server running.`);
     } else {
       setJob(value); setShowTestList(false); setLanguageFilter('all'); setTab('results');
@@ -608,6 +600,7 @@ export function App() {
     <main>
       <header className="topbar"><span>WORKSPACE <b>/</b> {tab === 'setup' ? 'New evaluation' : 'Test Reports'}</span><div className="topbar-actions"><ThemePicker /></div></header>
       {notice && <div className="notice" role="alert"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice('')}>×</button></div>}
+      {(connectionError || progressError) && <div className="notice" role="status">{connectionError || progressError}</div>}
       {busy && <div className="working" role="status"><span className="spinner" /> {busy}</div>}
       {queue && <TestQueue state={queue} busy={!!busy}
         onPause={() => void action('Pausing queue', async () => { setQueue(await api<TestQueueState>('/api/queue/pause', {})); })}
@@ -685,7 +678,8 @@ export function App() {
               const scope = e.target.value as Profile['scope']; setProfile(withSpeakerScope(profile, scope));
               setRecords(old => old.map(r => ({ ...r, regions: r.duration ? defaultRegions(scope, r.duration) : [] })));
             }}>
-              <option value="single">Single speaker</option><option value="agent">Agent only</option><option value="customer">Customer only</option><option value="both">Both, scored separately</option>
+              <option value="single">Single speaker</option><option value="agent">Agent only</option><option value="both">Both, scored separately</option>
+              {profile.scope === 'customer' && <option value="customer" disabled>Customer only (saved test)</option>}
             </select></label><label>Language / accent<input value={profile.language} maxLength={500} disabled={!!busy} onChange={e => setProfile(withLanguageAccent(profile, e.target.value))} placeholder="auto, British English, Italian for Italy..." /></label></div>
             <p className="hint" role="status">Language / accent is filled from a single locale code in the test name; you can override it. Accent fit: {activeDimensions(profile).includes('accentFit') ? `on (weight ${dimensionWeight(profile, 'accentFit')})` : 'off (no accent target or excluded by rubric)'}</p>
             <div className="button-row"><button className="secondary" disabled={!!busy || !(savedClips?.length ?? records.length)} onClick={() => void action('Applying language hint', async () => applyLanguageToAll())}>Apply to all recordings</button></div>

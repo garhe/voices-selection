@@ -1,16 +1,16 @@
-import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, profileRubric, MAX_SECONDS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, type DraftClip, type Profile, type Settings, type Rubric } from '../shared/domain';
+import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, profileRubric, MAX_SECONDS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Profile, type Settings, type Rubric } from '../shared/domain';
 import type { Recording } from './audio';
 import { testNameMetadata } from '../shared/history';
 
-export { DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE };
+export { DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE };
 
 export function defaultTestGuide(profile: Pick<Profile, 'scope' | 'rubric'>): string {
   const guides = profileRubric(profile).testGuides;
-  return profile.scope === 'single' ? guides.single : guides.conversation;
+  return profile.scope === 'single' ? guides.single : profile.scope === 'both' ? guides.both ?? BOTH_SPEAKERS_TEST_GUIDE : guides.conversation;
 }
 function usesDefaultGuide(profile: Profile): boolean {
   const guides = profileRubric(profile).testGuides;
-  return !profile.target.trim() || [guides.single, guides.conversation, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE].includes(profile.target);
+  return !profile.target.trim() || [guides.single, guides.conversation, guides.both, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE].includes(profile.target);
 }
 export function withSpeakerScope(profile: Profile, scope: Profile['scope']): Profile {
   const next = { ...profile, scope };

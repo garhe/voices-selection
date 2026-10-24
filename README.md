@@ -107,6 +107,32 @@ npm run dev
 
 Open **http://127.0.0.1:4310** in Edge or Chrome. Leave the terminal running while using the app; **Ctrl+C** stops it. On Windows, the existing `Start-VoiceLab.ps1` launcher is also available after cloning. The historical launcher name and local data-directory name are retained for compatibility.
 
+### Windows automatic startup and recovery
+
+To run independently of VS Code/Copilot, stop the manually launched server, then run in PowerShell:
+
+```powershell
+.\Install-VoiceLabAutoStart.ps1
+Start-ScheduledTask -TaskName 'Voices Selection'
+```
+
+This registers a **Voices Selection** task for the current Windows account, without storing a password or requesting administrator privileges. It starts at sign-in and runs while that account is signed in. A repeating one-minute trigger recovers the watchdog if it stops; concurrent task instances are ignored. The watchdog restarts the Node server ten seconds after any process exit. A Windows Job Object closes the child server if the watchdog is terminated, preventing orphan servers and port conflicts. The task has no execution time limit and is permitted on battery power. It does not depend on a terminal, browser tab, VS Code, or Copilot remaining open.
+
+Keep this checkout and the Node runtime in their installed locations. Startup does not resume interrupted evaluations or authorize new Azure calls: existing interrupted/queued tests retain the normal explicit resume/start controls. Windows shutdown, sign-out and sleep still make the local app unavailable; sign-in/wake recovery depends on Windows Task Scheduler. This is process-exit recovery, not a guarantee against a running-but-unresponsive server or an underlying configuration error.
+
+An already loaded app automatically retries failed initial loading, queue/history updates and active-test progress after a temporary disconnection. A visible reconnecting message clears after recovery; draft inputs and unsaved judging-panel edits are preserved. Polling requests time out after ten seconds, never overlap and never resubmit evaluations. If the browser initially loaded its own connection-error page while the server was down, refresh once after startup because the app's retry code has not loaded yet.
+
+Logs are written to `%LOCALAPPDATA%\VoiceQualityWorkbench\logs`: `watchdog.log` records server starts/exits and each of the latest ten server launches has separate `server-*.stdout.log` and `server-*.stderr.log` files. Treat logs as local diagnostic data; review before sharing.
+
+To stop automatic startup/recovery, disable the task before stopping it:
+
+```powershell
+Disable-ScheduledTask -TaskName 'Voices Selection'
+Stop-ScheduledTask -TaskName 'Voices Selection'
+```
+
+Re-enable it with `Enable-ScheduledTask -TaskName 'Voices Selection'`, then `Start-ScheduledTask`. Remove it with `Unregister-ScheduledTask -TaskName 'Voices Selection' -Confirm:$false`. The installer also supports `-WhatIf` to preview registration.
+
 Dependencies use the public npm registry, with pinned versions and integrity hashes in the lockfile. If your organization requires a package mirror, use its approved registry through `npm ci --registry=<approved-registry-url>` or `NPM_CONFIG_REGISTRY`. Do not disable TLS verification or commit registry authentication tokens.
 
 ### Each user configures their own Azure resource
@@ -176,7 +202,7 @@ Forced function calling improves formatting reliability but is not a guarantee t
 ## Workflow
 
 1. Enter a required **Test name** (up to 120 characters) and choose **Voice Selection** or **TTS evaluation**. Required fields use an inline `*`; native required-field validation remains enabled. Choose a saved **Evaluation guide / rubric** or expand **Edit rubric** to customize its criteria and stage weights.
-2. Choose single speaker, agent only, customer only, or both. New setups default to **Agent only**, matching the default call-center guide. Choosing **Single speaker** substitutes the one-speaker default guide unless the per-test guide was manually edited.
+2. Choose single speaker, agent only, or both, scored separately. New setups default to **Agent only**, matching the default call-center guide. Choosing **Single speaker** or **Both, scored separately** substitutes the matching default guide unless the per-test guide was manually edited. Customer-only is no longer offered for new selections; saved customer-only tests remain compatible.
 3. **Language / accent** automatically fills from a single locale code in the test name (for example, `ko-KR Female VTS` supplies `ko-KR`, and `thTH Male Cartesia` supplies `th-TH`). No locale, or multiple locales, uses `auto` rather than guessing. You can override the field manually, such as `British English` or `Italian for Italy`; changing the test name recalculates it. An explicit value supplies both the listening hint and the accent-fit target; `auto` detects language without scoring accent fit. The required **Target vocal style or test guide** defaults to the detailed call-center agent-only instructions, emphasizing natural, authentic delivery and specific evidence while excluding the customer. It remains editable. An empty or whitespace-only guide blocks new evaluations in both the setup screen and API, with a reminder to complete it. Saved results remain unchanged.
 
 Every judge receives an explicit checklist of requested scores, including **Audio quality** in both stages (by default included in TTS preference scores and diagnostic only for human auditions; custom rubrics control its stage weights). Clean audio and an absence of defects are positive evidence for a rating, not grounds for calling the dimension inapplicable. Each submitted dimension requires a non-empty explanation, including inactive or genuinely unassessable dimensions. Empty placeholders and an audio-quality null justified as "not applicable" for otherwise assessable speech are rejected; the existing bounded retry supplies the specific validation failure and asks the same judge to assess the audio independently again. Retry/session limits do not increase. Genuine uncertainty remains null with an explanation; no missing score is filled, averaged away or fabricated. Saved assessments remain readable and are never rewritten by this validation.
@@ -289,7 +315,7 @@ The built-in default is read-only, so name an edited copy and choose **Save as n
 
 Presets are saved in `rubrics.json` in the application's data directory, not browser storage, and are available in other browsers connected to the same local app. Saving a preset does not select it as a new global default: the original rubric remains the initial default. Unsaved rubric edits can be used in a test, but are not added to the reusable preset library until saved.
 
-The original agent/conversation test guide is retained. Selecting **Single speaker** automatically substitutes a one-speaker guide, without customer/agent exclusions. Switching back restores the conversation default. Each rubric can edit both default guides. Manually edited per-test guide text is preserved when changing scope or rubric.
+The original agent-only conversation test guide is retained. Selecting **Single speaker** automatically substitutes a one-speaker guide, without customer/agent exclusions. Selecting **Both, scored separately** uses a dedicated guide that evaluates agent and customer voices independently, without combining scores or letting one speaker influence the other's ratings. Switching back to **Agent only** restores the agent-only conversation default. Each rubric can edit all three default guides; older presets receive the built-in both-speaker guide when loaded. Manually edited per-test guide text is preserved when changing scope or rubric. New drafts and queue resets use the default guide matching their scope and rubric; saved evaluations are unchanged.
 
 New tests store the complete rubric definition in `profile.rubric`. Queued tests, retries and redos use this snapshot even after the preset changes or is deleted. Preset ID/revision identifies its source; the embedded snapshot is authoritative, including any unsaved edits used for that test. Reports display saved criteria, labels and stage weights, JSON retains the full snapshot and every CSV report includes preset metadata and the snapshot. Legacy tests without a snapshot keep the built-in scoring behavior; historical results are not rewritten.
 

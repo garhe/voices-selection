@@ -25,7 +25,8 @@ test('rubric editor exposes saved presets, seven editable dimensions, stage weig
   assert.match(html, /built-in default/);
   assert.match(html, /Save as new preset/); assert.match(html, /Save changes/);
   assert.match(html, /Single-speaker default test guide/);
-  assert.match(html, /Conversation default test guide/);
+  assert.match(html, /Agent-only conversation default test guide/);
+  assert.match(html, /Both speakers, scored separately default test guide/);
   assert.equal((html.match(/<fieldset/g) ?? []).length, 7);
   assert.equal((html.match(/class="rubric-title-button"/g) ?? []).length, 7);
   assert.match(html, /aria-label="Edit Naturalness dimension name"/);
@@ -103,6 +104,10 @@ test('workspace omits the preview badge and redundant bottom footer without disa
   assert.equal(html.includes('<footer>'), false);
   assert.ok(html.includes('I have permission to send these audio inputs'));
   assert.ok(html.includes('AI opinion scores are not validated MOS'));
+  assert.match(html, /<option value="single">Single speaker<\/option>/);
+  assert.match(html, /<option value="agent" selected="">Agent only<\/option>/);
+  assert.match(html, /<option value="both">Both, scored separately<\/option>/);
+  assert.doesNotMatch(html, /<option value="customer">Customer only<\/option>/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /main \{ max-width: none; padding-bottom: 8px; \}/);
   assert.doesNotMatch(css, /(?:body|html)\s*\{[^}]*overflow:\s*hidden/);

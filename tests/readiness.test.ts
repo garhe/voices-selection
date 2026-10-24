@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { applyLanguageHint, evaluationBlockers, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
-import { activeDimensions, eligibleScore, profileSchema, DEFAULT_RUBRIC } from '../shared/domain.js';
+import { activeDimensions, eligibleScore, profileSchema, rubricSchema, DEFAULT_RUBRIC, BOTH_SPEAKERS_TEST_GUIDE } from '../shared/domain.js';
 import type { Region } from '../src/audio.js';
 import { assessment, clip, profile as baseProfile } from './fixtures.js';
 
@@ -36,14 +36,44 @@ test('single-speaker scope automatically gets its own default guide without over
 
 test('switching and editing rubrics updates only default guides and preserves the matching speaker scope', () => {
   const rubric = structuredClone(DEFAULT_RUBRIC);
-  rubric.testGuides = { conversation: 'Custom conversation style.', single: 'Custom single-speaker style.' };
+  rubric.testGuides = { conversation: 'Custom conversation style.', single: 'Custom single-speaker style.', both: 'Custom separate-speaker style.' };
   const single = withRubric({ ...profile, target: SINGLE_SPEAKER_TEST_GUIDE }, rubric);
   assert.equal(single.target, rubric.testGuides.single);
   const agent = withSpeakerScope(single, 'agent');
   assert.equal(agent.target, rubric.testGuides.conversation);
+  const both = withSpeakerScope(agent, 'both');
+  assert.equal(both.target, rubric.testGuides.both);
+  assert.equal(withSpeakerScope(both, 'single').target, rubric.testGuides.single);
+  assert.equal(withRubric(both, DEFAULT_RUBRIC).target, BOTH_SPEAKERS_TEST_GUIDE);
   const edited = { ...rubric, testGuides: { ...rubric.testGuides, single: 'Updated single-speaker style.' } };
   assert.equal(withRubric(single, edited).target, edited.testGuides.single);
   assert.equal(withRubric({ ...single, target: 'My manual style.' }, DEFAULT_RUBRIC).target, 'My manual style.');
+});
+
+test('both-speaker defaults score each role independently and preserve manual guidance', () => {
+  const agent = { ...profile, scope: 'agent' as const, target: DEFAULT_TEST_GUIDE };
+  const both = withSpeakerScope(agent, 'both');
+  assert.equal(both.target, BOTH_SPEAKERS_TEST_GUIDE);
+  assert.match(both.target, /Evaluate the agent and customer separately/);
+  assert.match(both.target, /score only the requested speaker/);
+  assert.doesNotMatch(both.target, /Evaluate only the agent|Do not evaluate or score the customer/);
+  assert.equal(withSpeakerScope(both, 'agent').target, DEFAULT_TEST_GUIDE);
+  assert.equal(withSpeakerScope({ ...agent, target: 'Keep my custom guide.' }, 'both').target, 'Keep my custom guide.');
+  assert.equal(withRubric({ ...both, target: 'My manual style.' }, DEFAULT_RUBRIC).target, 'My manual style.');
+  assert.equal(withRubric({ ...both, target: DEFAULT_TEST_GUIDE }, DEFAULT_RUBRIC).target, BOTH_SPEAKERS_TEST_GUIDE);
+  assert.ok(profileSchema.safeParse(both).success);
+});
+
+test('older rubric snapshots load with a both-speaker default without changing saved targets', () => {
+  const { both, ...oldGuides } = DEFAULT_RUBRIC.testGuides;
+  const legacyRubric = { ...DEFAULT_RUBRIC, testGuides: oldGuides };
+  const parsed = rubricSchema.parse(legacyRubric);
+  assert.equal(parsed.testGuides.both, BOTH_SPEAKERS_TEST_GUIDE);
+  const saved = profileSchema.parse({ ...profile, scope: 'both', target: DEFAULT_TEST_GUIDE, rubric: legacyRubric });
+  assert.equal(saved.target, DEFAULT_TEST_GUIDE);
+  assert.equal(withRubric(saved, parsed).target, BOTH_SPEAKERS_TEST_GUIDE);
+  assert.ok(profileSchema.safeParse({ ...saved, scope: 'customer' }).success);
+  assert.equal('both' in oldGuides, false);
 });
 
 test('test-name locales populate listening language and accent fit without changing the guide or scope', () => {

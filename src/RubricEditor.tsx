@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { DEFAULT_RUBRIC, labels, rubricSchema, profileRubric, type Dimension, type Profile, type Rubric } from '../shared/domain';
+import { BOTH_SPEAKERS_TEST_GUIDE, DEFAULT_RUBRIC, labels, rubricSchema, profileRubric, type Dimension, type Profile, type Rubric } from '../shared/domain';
 import { ConfirmationDialog } from './ConfirmationDialog';
 
 export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSave, onDelete, onRefresh }: {
@@ -42,10 +42,12 @@ export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSav
       <label>Evaluation instructions<textarea rows={4} value={rubric.instructions} maxLength={6000} disabled={disabled} onChange={event => change({ instructions: event.target.value })} /></label>
       <details className="rubric-default-guides"><summary>Default test guides</summary>
         <p className="hint">Switching scope or rubric updates a default guide automatically. A manually edited test guide is kept.</p>
-        <label>Conversation default test guide<textarea rows={4} maxLength={1500} value={rubric.testGuides.conversation} disabled={disabled}
+        <label>Agent-only conversation default test guide<textarea rows={4} maxLength={1500} value={rubric.testGuides.conversation} disabled={disabled}
           onChange={event => change({ testGuides: { ...rubric.testGuides, conversation: event.target.value } })} /></label>
         <label>Single-speaker default test guide<textarea rows={4} maxLength={1500} value={rubric.testGuides.single} disabled={disabled}
           onChange={event => change({ testGuides: { ...rubric.testGuides, single: event.target.value } })} /></label>
+        <label>Both speakers, scored separately default test guide<textarea rows={4} maxLength={1500} value={rubric.testGuides.both ?? BOTH_SPEAKERS_TEST_GUIDE} disabled={disabled}
+          onChange={event => change({ testGuides: { ...rubric.testGuides, both: event.target.value } })} /></label>
       </details>
       <div className="rubric-dimensions">
         {rubric.dimensions.map(dimension => {

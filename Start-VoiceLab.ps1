@@ -1,3 +1,6 @@
+[CmdletBinding()]
+param([switch]$AutoRestart)
+
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
@@ -22,6 +25,44 @@ if (-not (Test-Path (Join-Path $PSScriptRoot 'node_modules'))) {
 }
 
 Write-Host 'Starting Voices Selection at http://127.0.0.1:4310 (or PORT from .env).'
+if ($AutoRestart) {
+    $logDirectory = Join-Path $env:LOCALAPPDATA 'VoiceQualityWorkbench\logs'
+    New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+    Start-Transcript -Path (Join-Path $logDirectory 'watchdog.log') -Append | Out-Null
+    $processJob = $null
+    try {
+        if (-not ('VoiceLabProcessJob' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'scripts\VoiceLabProcessJob.cs') }
+        $processJob = New-Object VoiceLabProcessJob
+        while ($true) {
+            $oldLogs = Get-ChildItem -LiteralPath $logDirectory -Filter 'server-*.stdout.log' |
+                Sort-Object LastWriteTime -Descending | Select-Object -Skip 9
+            foreach ($oldLog in $oldLogs) {
+                $errorLog = Join-Path $logDirectory ($oldLog.Name -replace '\.stdout\.log$', '.stderr.log')
+                Remove-Item -LiteralPath $oldLog.FullName
+                if (Test-Path -LiteralPath $errorLog) { Remove-Item -LiteralPath $errorLog }
+            }
+            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+            $outputLog = Join-Path $logDirectory "server-$stamp.stdout.log"
+            $errorLog = Join-Path $logDirectory "server-$stamp.stderr.log"
+            $child = Start-Process -FilePath (Join-Path $nodeDirectory 'node.exe') -ArgumentList @('--import', 'tsx', 'server\index.ts') `
+                -WorkingDirectory $PSScriptRoot -NoNewWindow -PassThru -RedirectStandardOutput $outputLog -RedirectStandardError $errorLog
+            try {
+                $processJob.Add($child.Handle)
+                Write-Host "$(Get-Date -Format o) Server started; PID $($child.Id). Logs: $outputLog"
+                $child.WaitForExit()
+                $code = $child.ExitCode
+            } finally {
+                if (-not $child.HasExited) { Stop-Process -Id $child.Id -Force }
+                $child.Dispose()
+            }
+            Write-Warning "$(Get-Date -Format o) Server exited with code $code. Restarting in 10 seconds. See $errorLog"
+            Start-Sleep -Seconds 10
+        }
+    } finally {
+        if ($processJob) { $processJob.Dispose() }
+        Stop-Transcript | Out-Null
+    }
+}
 Write-Host 'Press Ctrl+C to stop. Configure Azure directly in the judging panel; .env is optional.'
 & $npm run dev
 exit $LASTEXITCODE

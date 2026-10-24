@@ -20,6 +20,7 @@ export const voiceDimensionGuidance: Record<Dimension, string> = {
 };
 export const DEFAULT_TEST_GUIDE = 'This test evaluates the quality of a service agent’s voice in a call center context. You will hear recorded conversations between a customer and an agent. **Evaluate only the agent’s voice** and compare it with how a natural, authentic call center agent typically sounds in real-world interactions. **Do not evaluate or score the customer’s voice or speaking behavior.** All ratings and comments must focus exclusively on the agent, and your comments should be **as detailed and specific as possible**, describing the agent’s voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
 export const SINGLE_SPEAKER_TEST_GUIDE = 'This test evaluates the quality of a single speaker’s voice in a call center context. You will hear recordings of one speaker. **Evaluate only this speaker’s voice** and compare it with a natural, authentic voice in real-world call center interactions. All ratings and comments must focus exclusively on the recorded speaker, and your comments should be **as detailed and specific as possible**, describing the voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
+export const BOTH_SPEAKERS_TEST_GUIDE = 'This test evaluates the quality of both the agent and customer voices in a call center conversation. **Evaluate the agent and customer separately**, comparing each voice with natural, authentic vocal delivery for that speaker’s role in real-world interactions. For each assessment, **score only the requested speaker’s voice**; do not let the other speaker’s delivery influence the ratings, and do not combine the two speakers into one score. Evaluate audible voice quality, naturalness, speaking style and delivery, not script content or service performance. Keep ratings and comments specific to the assessed speaker, with **detailed, recording-specific observations** about strengths or issues that influenced the score.';
 export const rubricDimensionSchema = z.object({
   id: z.enum(dimensions),
   label: z.string().trim().min(1).max(80),
@@ -33,6 +34,7 @@ export const rubricContentSchema = z.object({
   testGuides: z.object({
     conversation: z.string().trim().min(1).max(1500),
     single: z.string().trim().min(1).max(1500),
+    both: z.string().trim().min(1).max(1500).default(BOTH_SPEAKERS_TEST_GUIDE),
   }).strict(),
   dimensions: z.array(rubricDimensionSchema).length(dimensions.length),
 }).strict();
@@ -52,7 +54,7 @@ export type Rubric = z.infer<typeof rubricSchema>;
 export const DEFAULT_RUBRIC: Rubric = {
   id: RUBRIC_VERSION, revision: 1, name: 'Default voice-persona rubric',
   instructions: 'Evaluate audible vocal delivery, not script quality or task completion. Assess voice persona, tone, timbre, emotional delivery and ease of listening. Give detailed, recording-specific reasons in English. Use 1 very poor, 2 poor, 3 fair, 4 good and 5 excellent; fractions are allowed. Use null with a specific explanation when audible evidence is insufficient; never guess.',
-  testGuides: { conversation: DEFAULT_TEST_GUIDE, single: SINGLE_SPEAKER_TEST_GUIDE },
+  testGuides: { conversation: DEFAULT_TEST_GUIDE, single: SINGLE_SPEAKER_TEST_GUIDE, both: BOTH_SPEAKERS_TEST_GUIDE },
   dimensions: dimensions.map(id => ({
     id, label: labels[id], description: voiceDimensionGuidance[id], enabled: true,
     weights: { audition: id === 'audioQuality' ? 0 : 1, tts: 1 },
