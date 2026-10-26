@@ -415,12 +415,14 @@ test('API persists clips, judges and results; validates requests; retries only i
     const created = await response.json() as Job;
     assert.equal(created.name, 'Auditions - round 1');
     assert.equal(created.rubric, RUBRIC_VERSION);
+    assert.deepEqual(created.profile.rubric, DEFAULT_RUBRIC);
     const done = await wait(created.id);
     assert.equal(calls, 2);
     assert.equal(done.results.filter(r => r.status === 'completed').length, 1);
     assert.equal(done.results.find(r => r.status === 'completed')!.responseFormat, 'json_text');
     assert.equal(done.results.filter(r => r.status === 'failed').length, 1);
     assert.equal((await store.jobs())[0].name, 'Auditions - round 1');
+    assert.deepEqual((await store.jobs())[0].profile.rubric, DEFAULT_RUBRIC, 'The default rubric is persisted with the test.');
     assert.equal((await (await request('/api/jobs')).json())[0].name, 'Auditions - round 1');
     const audio = await request(`/api/clips/${id}/audio`);
     assert.equal(audio.status, 200); assert.equal((await audio.arrayBuffer()).byteLength, 48044);

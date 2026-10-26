@@ -1,8 +1,30 @@
-import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, profileRubric, MAX_SECONDS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Profile, type Settings, type Rubric } from '../shared/domain';
+import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, profileRubric, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Profile, type Settings, type Rubric } from '../shared/domain';
 import type { Recording } from './audio';
 import { testNameMetadata } from '../shared/history';
 
 export { DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE };
+
+export function rubricHasChanges(rubric: Rubric, stored?: Rubric): boolean {
+  return !stored || rubric.id !== stored.id || rubric.revision !== stored.revision ||
+    rubric.name !== stored.name || rubric.instructions !== stored.instructions ||
+    rubric.testGuides.conversation !== stored.testGuides.conversation ||
+    rubric.testGuides.single !== stored.testGuides.single ||
+    (rubric.testGuides.both ?? BOTH_SPEAKERS_TEST_GUIDE) !== (stored.testGuides.both ?? BOTH_SPEAKERS_TEST_GUIDE) ||
+    rubric.dimensions.length !== stored.dimensions.length ||
+    rubric.dimensions.some((dimension, index) => {
+      const saved = stored.dimensions[index];
+      return dimension.id !== saved.id || dimension.label !== saved.label ||
+        dimension.description !== saved.description || dimension.enabled !== saved.enabled ||
+        dimension.weights.audition !== saved.weights.audition || dimension.weights.tts !== saved.weights.tts;
+    });
+}
+
+export function newTestProfile(previous: Profile = {
+  stage: 'audition', scope: 'agent', speakerMode: 'automatic', target: '', language: 'auto', targetMarket: '',
+}): Profile {
+  const next = { ...previous, rubric: structuredClone(DEFAULT_RUBRIC) };
+  return withTestNameLanguage({ ...next, target: defaultTestGuide(next) }, '');
+}
 
 export function defaultTestGuide(profile: Pick<Profile, 'scope' | 'rubric'>): string {
   const guides = profileRubric(profile).testGuides;

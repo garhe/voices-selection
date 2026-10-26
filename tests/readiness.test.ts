@@ -1,12 +1,92 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { applyLanguageHint, evaluationBlockers, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
-import { activeDimensions, eligibleScore, profileSchema, rubricSchema, DEFAULT_RUBRIC, BOTH_SPEAKERS_TEST_GUIDE } from '../shared/domain.js';
+import { applyLanguageHint, evaluationBlockers, newTestProfile, rubricHasChanges, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
+import { activeDimensions, eligibleScore, profileSchema, rubricSchema, DEFAULT_RUBRIC, BOTH_SPEAKERS_TEST_GUIDE, type Rubric } from '../shared/domain.js';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { RubricEditor } from '../src/RubricEditor.js';
 import type { Region } from '../src/audio.js';
 import { assessment, clip, profile as baseProfile } from './fixtures.js';
 
 const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
+
+test('fresh tests load an independent saved default rubric, including after a custom test', () => {
+  const initial = newTestProfile();
+  assert.deepEqual(initial.rubric, DEFAULT_RUBRIC);
+  assert.equal(initial.target, DEFAULT_TEST_GUIDE);
+  assert.equal(rubricHasChanges(initial.rubric!, DEFAULT_RUBRIC), false);
+  for (const scope of ['agent', 'single', 'both'] as const) {
+    const previous = {
+      ...profile, scope, stage: 'tts' as const, language: 'es-ES', targetMarket: 'es-ES',
+      rubric: { ...structuredClone(DEFAULT_RUBRIC), name: 'Unsaved custom rubric' },
+    };
+    const snapshot = structuredClone(previous);
+    const next = newTestProfile(previous);
+    assert.deepEqual(next.rubric, DEFAULT_RUBRIC);
+    assert.equal(next.target, scope === 'single' ? SINGLE_SPEAKER_TEST_GUIDE : scope === 'both' ? BOTH_SPEAKERS_TEST_GUIDE : DEFAULT_TEST_GUIDE);
+    assert.equal(next.scope, scope);
+    assert.equal(next.stage, 'tts');
+    assert.equal(next.language, 'auto');
+    assert.equal(next.targetMarket, '');
+    next.rubric!.dimensions[0].label = 'Draft-only label';
+    next.rubric!.testGuides.single = 'Draft-only guide';
+    assert.deepEqual(previous, snapshot);
+    assert.notEqual(DEFAULT_RUBRIC.dimensions[0].label, 'Draft-only label');
+    assert.notEqual(DEFAULT_RUBRIC.testGuides.single, 'Draft-only guide');
+  }
+});
+
+test('rubric changes compare values rather than serialization order and clear when edits are reverted', () => {
+  const stored = rubricSchema.parse(DEFAULT_RUBRIC);
+  assert.notEqual(JSON.stringify(stored), JSON.stringify(DEFAULT_RUBRIC), 'Schema parsing reorders rubric metadata.');
+  assert.equal(rubricHasChanges(DEFAULT_RUBRIC, stored), false);
+  assert.equal(rubricHasChanges(stored, DEFAULT_RUBRIC), false);
+  assert.equal(rubricHasChanges(stored), true, 'A removed preset remains an unsaved snapshot.');
+  const edits: ((rubric: Rubric) => void)[] = [
+    rubric => { rubric.name += ' edited'; },
+    rubric => { rubric.instructions += ' '; },
+    rubric => { rubric.testGuides.conversation += ' edited'; },
+    rubric => { rubric.testGuides.single += ' edited'; },
+    rubric => { rubric.testGuides.both += ' edited'; },
+    rubric => { rubric.dimensions[0].label += ' edited'; },
+    rubric => { rubric.dimensions[0].description += ' edited'; },
+    rubric => { rubric.dimensions[0].enabled = false; },
+    rubric => { rubric.dimensions[0].weights.audition = 0; },
+    rubric => { rubric.dimensions[0].weights.tts = 0; },
+    rubric => { rubric.dimensions.reverse(); },
+    rubric => { rubric.dimensions.pop(); },
+    rubric => { rubric.revision++; },
+  ];
+  for (const edit of edits) {
+    const draft = structuredClone(stored);
+    edit(draft);
+    assert.equal(rubricHasChanges(draft, stored), true);
+    Object.assign(draft, structuredClone(stored));
+    assert.equal(rubricHasChanges(draft, stored), false);
+  }
+  const custom = { ...stored, id: 'custom', name: 'Custom saved preset' };
+  assert.equal(rubricHasChanges(withRubric(profile, custom).rubric!, rubricSchema.parse(custom)), false);
+});
+
+test('rubric editor shows unsaved changes only for differing values, not a loaded default snapshot', () => {
+  const draft = newTestProfile();
+  function markup(presets?: Rubric[]) {
+    return renderToStaticMarkup(createElement(RubricEditor, {
+      profile: draft, presets, busy: false,
+      onChange() {}, onSelect() {}, onSave() {}, onDelete() {}, onRefresh() {},
+    }));
+  }
+  assert.doesNotMatch(markup(), /unsaved changes|Unsaved rubric edits/);
+  const presets = [rubricSchema.parse(DEFAULT_RUBRIC)];
+  assert.match(markup(presets), /<summary>Edit rubric<\/summary>/);
+  draft.rubric!.instructions += ' Edited.';
+  assert.match(markup(presets), /Edit rubric · unsaved changes/);
+  draft.rubric!.instructions = DEFAULT_RUBRIC.instructions;
+  assert.doesNotMatch(markup(presets), /unsaved changes|Unsaved rubric edits/);
+  draft.rubric = profileSchema.parse(draft).rubric;
+  assert.doesNotMatch(markup(presets), /unsaved changes|Unsaved rubric edits/);
+});
 
 test('editable rubric drafts use yes/no equal contributions without changing saved source weights', () => {
   const saved = structuredClone(DEFAULT_RUBRIC);

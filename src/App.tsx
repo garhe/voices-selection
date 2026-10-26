@@ -4,7 +4,7 @@ import {
   dimensions, dimensionLabel, dimensionWeight, profileRubric, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, retryableAudioIssue, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, languageHintSchema, resolveLanguageHint, rolesForScope,
 } from '../shared/domain';
 import { automaticRegions, base64, browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
-import { applyLanguageHint, defaultTestGuide, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric, DEFAULT_TEST_GUIDE } from './readiness';
+import { applyLanguageHint, newTestProfile, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
 import { canManageTest, testHistory, testMetadataSchema, testNameMetadata, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
 import { TestLibrary, TestMetadataEditor, type ReportKind } from './TestLibrary';
@@ -296,7 +296,7 @@ function AzureConnection({ config, busy, onAction, onSaved }: {
 export function App() {
   const [tab, setTab] = useState<'setup' | 'results'>('setup');
   const [testName, setTestName] = useState('');
-  const [profile, setProfile] = useState<Profile>({ stage: 'audition', scope: 'agent', speakerMode: 'automatic', target: DEFAULT_TEST_GUIDE, language: 'auto', targetMarket: '' });
+  const [profile, setProfile] = useState<Profile>(() => newTestProfile());
   const [config, setConfig] = useState<Config>();
   const [rubrics, setRubrics] = useState<Rubric[]>();
   const [records, setRecords] = useState<Recording[]>([]);
@@ -403,13 +403,13 @@ export function App() {
   function beginNewEvaluation() {
     if (tab === 'setup') return;
     const source = job?.profile ?? profile;
-    setProfile(withTestNameLanguage({ ...source, target: defaultTestGuide(source) }, ''));
+    setProfile(newTestProfile(source));
     if (job) setConfig(previous => previous ? { ...previous, judges: job.judges.map(judge => ({ ...judge })) } : previous);
     setTestName(''); setRecords([]); setSavedClips(undefined); setDraftSource(undefined);
     setSelected(undefined); setBuffer(undefined); setSourceUrl(''); setPreviewUrl('');
     setConsent(false); setConfirmDelete(undefined); setTab('setup');
     setEditingTest(undefined);
-    setNotice('New test draft ready. Previous evaluation settings are kept; recordings and audio permission are cleared. Enter a test name and select a folder. Saved results are unchanged.');
+    setNotice('New test draft ready with the built-in default rubric. Other evaluation settings are kept; recordings and audio permission are cleared. Enter a test name and select a folder. Saved results are unchanged.');
   }
   function applyLanguageToAll() {
     const language = languageHintSchema.parse(profile.language);
@@ -486,7 +486,7 @@ export function App() {
     });
     if (enqueue) {
       setTestName(''); setRecords([]); setSelected(undefined); setSavedClips(undefined); setDraftSource(undefined); setConsent(false);
-      setProfile(previous => withTestNameLanguage({ ...previous, target: defaultTestGuide(previous) }, ''));
+      setProfile(previous => newTestProfile(previous));
       setNotice(`"${name}" added to the queue. Prepare the next test; saved tests run one at a time, even if this browser is closed. Keep the server running.`);
     } else {
       setJob(value); setShowTestList(false); setLanguageFilter('all'); setTab('results');

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { BOTH_SPEAKERS_TEST_GUIDE, DEFAULT_RUBRIC, labels, rubricSchema, profileRubric, type Dimension, type Profile, type Rubric } from '../shared/domain';
 import { ConfirmationDialog } from './ConfirmationDialog';
+import { rubricHasChanges } from './readiness';
 
 export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSave, onDelete, onRefresh }: {
   profile: Profile; presets?: Rubric[]; busy: boolean;
@@ -12,7 +13,7 @@ export function RubricEditor({ profile, presets, busy, onChange, onSelect, onSav
   const rubric = profileRubric(profile);
   const library = presets ?? [DEFAULT_RUBRIC];
   const stored = library.find(item => item.id === rubric.id);
-  const dirty = !stored || JSON.stringify(stored) !== JSON.stringify(rubric);
+  const dirty = rubricHasChanges(rubric, stored);
   const validation = rubricSchema.safeParse(rubric);
   const canCopy = !library.some(item => item.name.toLowerCase() === rubric.name.trim().toLowerCase());
   const canUpdate = stored && stored.id !== DEFAULT_RUBRIC.id && stored.revision === rubric.revision;
