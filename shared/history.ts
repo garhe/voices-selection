@@ -63,7 +63,7 @@ export function testHistory(job: Job): TestHistory {
 }
 
 export const TEST_PAGE_SIZE = 30;
-export const TEST_PAGE_SIZES = [30, 40, 50] as const;
+export const TEST_PAGE_SIZES = [30, 40, 50, 100] as const;
 export function testTableCsv(jobs: Job[]): string {
   const judgeColumns = new Map<string, string>();
   const reports = jobs.map(job => {
@@ -123,22 +123,24 @@ export const TEST_STATUS_FILTERS = ['completed', 'incomplete', 'running', 'queue
 export type TestFilters = {
   search: string; language: string; gender: string; dateFrom: string; dateTo: string; sort: TestSort;
   status: '' | typeof TEST_STATUS_FILTERS[number];
+  stage: '' | TestHistory['stage'];
 };
 export const defaultTestFilters: TestFilters = {
-  search: '', language: '', gender: '', dateFrom: '', dateTo: '', sort: 'newest', status: '',
+  search: '', language: '', gender: '', dateFrom: '', dateTo: '', sort: 'newest', status: '', stage: '',
 };
 function localDay(timestamp: string) {
   const date = new Date(timestamp);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 export function queryTests(entries: TestHistory[], filters: TestFilters, requestedPage: number, pageSize = TEST_PAGE_SIZE) {
-  if (!TEST_PAGE_SIZES.some(size => size === pageSize)) throw new Error('Choose 30, 40 or 50 tests per page.');
+  if (!TEST_PAGE_SIZES.some(size => size === pageSize)) throw new Error('Choose 30, 40, 50 or 100 tests per page.');
   const search = filters.search.trim().toLocaleLowerCase();
   const matches = entries.filter(entry => {
     const day = localDay(entry.createdAt);
     return (!search || [entry.name, entry.id, ...entry.voices, ...entry.languages].join('\n').toLocaleLowerCase().includes(search)) &&
       (!filters.language || entry.languages.some(language => language.toLowerCase() === filters.language.toLowerCase())) &&
       (!filters.gender || entry.genders.some(gender => gender === filters.gender)) &&
+      (!filters.stage || entry.stage === filters.stage) &&
       (!filters.status || (filters.status === 'incomplete'
         ? entry.status === 'completed' && entry.incomplete === true
         : entry.status === filters.status && (filters.status !== 'completed' || !entry.incomplete))) &&

@@ -99,7 +99,7 @@
 .page-title.test-library-title{margin-bottom:16px;gap:16px}
 .test-library-title h1{font-size:28px;letter-spacing:-.6px}
 .card.test-library{padding:16px}
-.test-filters{display:grid;grid-template-columns:minmax(180px,1.6fr) minmax(125px,1fr) repeat(2,minmax(95px,.8fr)) repeat(2,minmax(135px,1fr)) minmax(145px,1.2fr);gap:10px;align-items:start}
+.test-filters{display:grid;grid-template-columns:minmax(180px,1.6fr) minmax(125px,1fr) minmax(145px,1fr) repeat(2,minmax(95px,.8fr)) repeat(2,minmax(135px,1fr)) minmax(145px,1.2fr);gap:10px;align-items:start}
 .test-filters label{font-size:12px;gap:4px}
 .test-filters input,.test-filters select{font-size:13px;height:36px;min-height:36px;padding:7px 9px}
 .test-list-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:10px 0}
@@ -178,7 +178,7 @@
 .test-metadata form>label{max-width:650px}
 .name-metadata{margin:18px 0;font-size:13px}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-@media(max-width:1450px){.test-filters{grid-template-columns:repeat(4,minmax(0,1fr))}.test-filters .test-search{grid-column:span 2}}
+@media(max-width:1650px){.test-filters{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:1000px){.test-filters{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:480px){.test-filters{grid-template-columns:minmax(0,1fr)}.test-filters .test-search{grid-column:auto}}
 @media(forced-colors:active){.test-score,.test-score-scale{color:CanvasText}.test-table th{background:Canvas;color:CanvasText;box-shadow:0 1px 0 CanvasText}}

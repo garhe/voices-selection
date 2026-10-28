@@ -51,6 +51,10 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
           <option value="">All statuses</option>{TEST_STATUS_FILTERS.map(status =>
             <option key={status} value={status}>{status === 'incomplete' ? 'Completed*' : testStatusLabel({ status })}</option>)}
         </select></label>
+        <label>Test type<select value={filters.stage} onChange={event => update('stage', event.target.value as TestFilters['stage'])}>
+          <option value="">All test types</option>
+          <option value="audition">{testType('audition')}</option><option value="tts">{testType('tts')}</option>
+        </select></label>
         <label>Language<select value={filters.language} onChange={event => update('language', event.target.value)}>
           <option value="">All languages</option>{languages.map(language => <option key={language}>{language}</option>)}
         </select></label>
@@ -77,7 +81,7 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
             onClick={() => onRetryUnassessed(retryableSelected)}>Retry all unassessable ({retryableSelected.length})</button>}
           <button className="text-button" disabled={busy} onClick={() => onSelectionChange([])}>Clear selection</button>
         </div>}
-        <button className="text-button" disabled={!filters.search && !filters.status && !filters.language && !filters.gender && !filters.dateFrom && !filters.dateTo && filters.sort === 'newest'} onClick={() => { setFilters({ ...defaultTestFilters }); setDateReset(previous => previous + 1); setPage(1); }}>Clear filters</button>
+        <button className="text-button" disabled={!filters.search && !filters.status && !filters.stage && !filters.language && !filters.gender && !filters.dateFrom && !filters.dateTo && filters.sort === 'newest'} onClick={() => { setFilters({ ...defaultTestFilters }); setDateReset(previous => previous + 1); setPage(1); }}>Clear filters</button>
       </div>
       <div className="table-scroll test-table-scroll" tabIndex={0} aria-label="Saved test list">
         <table className="test-table">

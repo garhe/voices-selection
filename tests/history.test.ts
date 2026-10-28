@@ -361,7 +361,11 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   assert.match(html, /title="Talent 60 \/ speaker, Tied talent B \/ speaker, Tied talent C \/ speaker"/);
   const toolbar = html.split('<div class="test-filters">')[1]?.split('<div class="test-list-meta">')[0];
   assert.ok(toolbar);
-  assert.equal((toolbar.match(/<label/g) ?? []).length, 7);
+  assert.equal((toolbar.match(/<label/g) ?? []).length, 8);
+  assert.match(toolbar, /<label>Test type<select>/);
+  assert.match(toolbar, /<option value=""[^>]*>All test types<\/option>/);
+  assert.match(toolbar, /<option value="audition">Voice Selection<\/option>/);
+  assert.match(toolbar, /<option value="tts">TTS evaluation<\/option>/);
   assert.match(toolbar, /<label>Test Status<select>/);
   assert.match(toolbar, /<option value=""[^>]*>All statuses<\/option>/);
   for (const status of TEST_STATUS_FILTERS)
@@ -384,7 +388,7 @@ test('report page size controls, row counts, captions and ranges agree for every
   const noop = () => {};
   for (const size of TEST_PAGE_SIZES) {
     const html = renderToStaticMarkup(createElement(TestLibrary, {
-      entries: entries(65), busy: false, pageSize: size, onPageSizeChange: noop,
+      entries: entries(105), busy: false, pageSize: size, onPageSizeChange: noop,
       selectedIds: ['64'], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onRetryUnassessed: noop, onOpen: noop, onEdit: noop, onDelete: noop,
       onDownload: noop, onRegenerate: noop, onRefresh: noop,
     }));
@@ -569,6 +573,37 @@ test('search and combined filters apply before pagination and search all saved t
   assert.equal(queryTests(values, { ...defaultTestFilters, gender: 'Unspecified' }, 1).total, 0);
 });
 
+test('test type filters use saved stages and combine with other filters before pagination', () => {
+  const values = entries(240);
+  values.forEach((entry, index) => {
+    entry.stage = index % 3 === 0 ? 'tts' : 'audition';
+    entry.status = index % 5 === 0 ? 'cancelled' : 'completed';
+  });
+  values[1].name = 'TTS evaluation';
+  for (const stage of ['audition', 'tts'] as const) {
+    const expected = values.filter(entry => entry.stage === stage);
+    for (const size of TEST_PAGE_SIZES) {
+      const last = queryTests(values, { ...defaultTestFilters, stage }, 99, size);
+      assert.equal(last.total, expected.length);
+      assert.equal(last.page, Math.ceil(expected.length / size));
+      assert.equal(last.entries.length, (expected.length - 1) % size + 1);
+      const all = Array.from({ length: last.pages }, (_, page) =>
+        queryTests(values, { ...defaultTestFilters, stage }, page + 1, size).entries).flat();
+      assert.ok(all.every(entry => entry.stage === stage));
+      assert.deepEqual(all.map(entry => entry.id).sort(), expected.map(entry => entry.id).sort());
+    }
+  }
+  const combined = queryTests(values, {
+    ...defaultTestFilters, stage: 'tts', status: 'completed', search: 'Talent 6',
+    language: 'Italian', gender: 'Male', dateFrom: '2026-10-01', dateTo: '2026-10-01',
+  }, 99);
+  assert.deepEqual(combined.entries.map(entry => entry.id).sort(), ['6', '66']);
+  assert.equal(combined.page, 1);
+  assert.equal(queryTests(values, { ...defaultTestFilters, stage: 'tts', language: 'Spanish' }, 99).total, 0);
+  assert.equal(queryTests(values, defaultTestFilters, 1).total, 240);
+  assert.equal(defaultTestFilters.stage, '');
+});
+
 test('status filters separate Completed from Completed* and combine globally with the other filters', () => {
   const values = entries(240);
   values.forEach((entry, index) => {
@@ -592,7 +627,8 @@ test('status filters separate Completed from Completed* and combine globally wit
   assert.equal(defaultTestFilters.status, '');
 });
 
-test('pagination supports exactly 30, 40 and 50 rows with global filtering and stale-page clamping', () => {
+test('pagination supports 30, 40, 50 and 100 rows with global filtering and stale-page clamping', () => {
+  assert.deepEqual(TEST_PAGE_SIZES, [30, 40, 50, 100]);
   const values = entries(101);
   for (const size of TEST_PAGE_SIZES) {
     const first = queryTests(values, defaultTestFilters, 1, size);
@@ -611,8 +647,8 @@ test('pagination supports exactly 30, 40 and 50 rows with global filtering and s
     const empty = queryTests([], defaultTestFilters, 99, size);
     assert.deepEqual([empty.entries.length, empty.pages, empty.page], [0, 1, 1]);
   }
-  for (const size of [0, 29, 31, 41, 51, 100, NaN, Infinity])
-    assert.throws(() => queryTests(values, defaultTestFilters, 1, size), /30, 40 or 50/);
+  for (const size of [0, 29, 31, 41, 51, 101, 1000, NaN, Infinity])
+    assert.throws(() => queryTests(values, defaultTestFilters, 1, size), /30, 40, 50 or 100/);
 });
 
 function csvTable(csv: string) {
