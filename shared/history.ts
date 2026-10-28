@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { evaluationName, summarize, testNameSchema, voiceGenders, type Job, type VoiceGender } from './domain.js';
+import { evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, voiceGenders, type Job, type VoiceGender } from './domain.js';
+import { csvCell } from './csv.js';
 
 export const testMetadataSchema = z.object({
   name: testNameSchema,
@@ -33,8 +34,8 @@ export function testNameMetadata(name: string): Pick<TestHistory, 'languages' | 
     tags.push(`${match[1]}-${match[2]}`);
   const languages = [...new Set(tags.map(tag => Intl.getCanonicalLocales(tag)[0])
     .filter(tag => languageNames.of(new Intl.Locale(tag).language)))].sort();
-  const found = new Set([...name.matchAll(/(?<![a-z0-9])(female|male|other|unspecified|non[- ]?binary)(?![a-z0-9])/gi)]
-    .map(match => /^non/i.test(match[1]) ? 'other' : match[1].toLowerCase()));
+  const found = new Set([...name.matchAll(/(?<![a-z0-9])(female|male|f|m|other|unspecified|non[- ]?binary)(?![a-z0-9])/gi)]
+    .map(match => /^non/i.test(match[1]) ? 'other' : /^f$/i.test(match[1]) ? 'female' : /^m$/i.test(match[1]) ? 'male' : match[1].toLowerCase()));
   const genders = voiceGenders.filter(gender => found.has(gender.toLowerCase()));
   return { languages, genders: genders.length ? genders : ['Unspecified'] };
 }
@@ -54,6 +55,60 @@ export function testHistory(job: Job): TestHistory {
 }
 
 export const TEST_PAGE_SIZE = 30;
+export const TEST_PAGE_SIZES = [30, 40, 50] as const;
+export function testTableCsv(jobs: Job[]): string {
+  const judgeColumns = new Map<string, string>();
+  const reports = jobs.map(job => {
+    const occurrences = new Map<string, number>();
+    const judges = new Map(job.judges.map(judge => {
+      const identity = JSON.stringify([judge.name, judge.deployment]);
+      const occurrence = (occurrences.get(identity) ?? 0) + 1;
+      occurrences.set(identity, occurrence);
+      const key = JSON.stringify([judge.name, judge.deployment, occurrence]);
+      judgeColumns.set(key, `${judge.name} (${judge.deployment})${occurrence > 1 ? ` #${occurrence}` : ''}`);
+      return [key, judge.id];
+    }));
+    const voices = summarizeVoiceEvidence(job).sort((a, b) =>
+      a.score === null ? (b.score === null ? a.voice.localeCompare(b.voice) || a.role.localeCompare(b.role) : 1) :
+        b.score === null ? -1 : b.score - a.score || a.voice.localeCompare(b.voice) || a.role.localeCompare(b.role));
+    const bestScore = voices.find(voice => voice.score !== null)?.score ?? null;
+    const isBest = (voice: typeof voices[number]) =>
+      voice.score !== null && bestScore !== null && Math.abs(voice.score - bestScore) < 1e-9;
+    return { job, judges, best: voices.filter(isBest), other: voices.filter(voice => !isBest(voice)) };
+  });
+  const bestCount = Math.max(1, ...reports.map(report => report.best.length));
+  const otherCount = Math.max(0, ...reports.map(report => report.other.length));
+  const groups = [
+    ...Array.from({ length: bestCount }, (_, index) => ({ kind: 'best' as const, index, label: bestCount === 1 ? 'Best voice' : `Best voice ${index + 1}` })),
+    ...Array.from({ length: otherCount }, (_, index) => ({ kind: 'other' as const, index, label: `Other voice ${index + 1}` })),
+  ];
+  const rows = [
+    ['Test name', 'Test time', 'Locale', 'Gender', ...groups.flatMap(({ label }) => [
+      `${label} name`, `${label} overall score`,
+      ...[...judgeColumns.values()].map(judge => `${label} - ${judge} average score`),
+    ])],
+    ...reports.map(report => {
+      const metadata = testNameMetadata(evaluationName(report.job));
+      return [
+        evaluationName(report.job), report.job.createdAt, metadata.languages.join(', ') || 'Not specified', metadata.genders.join(', ') || 'Unspecified',
+        ...groups.flatMap(({ kind, index }) => {
+          const voice = report[kind][index];
+          if (!voice) return ['', kind === 'best' && index === 0 && !report.best.length ? 'Not assessed' : '', ...[...judgeColumns].map(() => '')];
+          return [
+            voice.voice, voice.score === null ? 'Not assessed' : voice.score.toFixed(2),
+            ...[...judgeColumns.keys()].map(key => {
+              const judgeId = report.judges.get(key);
+              if (!judgeId) return '';
+              const score = voice.judges.find(judge => judge.judgeId === judgeId)?.score;
+              return score == null ? 'Not assessed' : score.toFixed(2);
+            }),
+          ];
+        }),
+      ];
+    }),
+  ];
+  return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+}
 export type TestSort = 'newest' | 'oldest' | 'name-asc' | 'name-desc' | 'score-desc' | 'score-asc';
 export type TestFilters = {
   search: string; language: string; gender: string; dateFrom: string; dateTo: string; sort: TestSort;
@@ -65,7 +120,8 @@ function localDay(timestamp: string) {
   const date = new Date(timestamp);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
-export function queryTests(entries: TestHistory[], filters: TestFilters, requestedPage: number) {
+export function queryTests(entries: TestHistory[], filters: TestFilters, requestedPage: number, pageSize = TEST_PAGE_SIZE) {
+  if (!TEST_PAGE_SIZES.some(size => size === pageSize)) throw new Error('Choose 30, 40 or 50 tests per page.');
   const search = filters.search.trim().toLocaleLowerCase();
   const matches = entries.filter(entry => {
     const day = localDay(entry.createdAt);
@@ -83,7 +139,7 @@ export function queryTests(entries: TestHistory[], filters: TestFilters, request
     else order = a.createdAt.localeCompare(b.createdAt) * (filters.sort === 'oldest' ? 1 : -1);
     return order || b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id);
   });
-  const pages = Math.max(1, Math.ceil(matches.length / TEST_PAGE_SIZE));
+  const pages = Math.max(1, Math.ceil(matches.length / pageSize));
   const page = Math.max(1, Math.min(pages, Math.trunc(requestedPage) || 1));
-  return { entries: matches.slice((page - 1) * TEST_PAGE_SIZE, page * TEST_PAGE_SIZE), total: matches.length, pages, page };
+  return { entries: matches.slice((page - 1) * pageSize, page * pageSize), total: matches.length, pages, page };
 }

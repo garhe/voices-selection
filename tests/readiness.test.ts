@@ -185,19 +185,19 @@ function readyInput(): Parameters<typeof evaluationBlockers>[0] {
     name: 'Audition round 1', profile,
     config: { configured: true, judges: [{ id: randomUUID(), name: 'Judge', deployment: 'judge-deployment' }] },
     recordings: [{ include: true, regions: [region()] }],
-    scope: 'single', consent: true, busy: false, running: false,
+    scope: 'single', busy: false, running: false,
   };
 }
 test('a complete setup is startable and every disabled condition has an explanation', () => {
   assert.deepEqual(evaluationBlockers(readyInput()), []);
   const input = readyInput();
-  input.name = ''; input.config = undefined; input.recordings = []; input.consent = false;
+  input.name = ''; input.config = undefined; input.recordings = [];
   const blockers = evaluationBlockers(input);
-  assert.equal(blockers.length, 4);
+  assert.equal(blockers.length, 3);
   assert.ok(blockers.some(b => /test name/.test(b)));
   assert.ok(blockers.some(b => /Azure settings/.test(b)));
   assert.ok(blockers.some(b => /audio folder/.test(b)));
-  assert.ok(blockers.some(b => /permission checkbox/.test(b)));
+  assert.ok(blockers.every(b => !/permission checkbox/.test(b)));
 });
 test('a missing or whitespace-only target guide blocks imported and saved inputs in both stages and modes', () => {
   for (const stage of ['audition', 'tts'] as const) for (const speakerMode of ['manual', 'automatic'] as const) {

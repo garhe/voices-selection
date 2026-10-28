@@ -32,23 +32,23 @@ test('automatic windows cover the entire file for each requested role without us
   }
   for (const duration of [0, 0.49, NaN, Infinity]) assert.throws(() => automaticRegions(duration, 'agent'));
 });
-test('automatic readiness never requires per-file review but still requires credentials, a panel and consent', () => {
+test('automatic readiness requires credentials and a panel, without permission or per-file review', () => {
   const input: Parameters<typeof evaluationBlockers>[0] = {
-    name: 'Automatic conversation test', profile: { ...automatic, target: 'Warm delivery' }, speakerMode: 'automatic', scope: 'both', consent: true, busy: false, running: false,
+    name: 'Automatic conversation test', profile: { ...automatic, target: 'Warm delivery' }, speakerMode: 'automatic', scope: 'both', busy: false, running: false,
     config: { configured: true, judges: [{ id: crypto.randomUUID(), name: 'Judge', deployment: 'test' }] },
     recordings: [{ include: true, regions: [] }, { include: true, regions: [] }],
   };
   assert.deepEqual(evaluationBlockers(input), []);
   assert.equal(inputCount(input.recordings, 'both', 'automatic'), 4);
-  input.consent = false; input.config!.configured = false; input.config!.judges[0].deployment = '';
-  assert.equal(evaluationBlockers(input).length, 3);
+  input.config!.configured = false; input.config!.judges[0].deployment = '';
+  assert.equal(evaluationBlockers(input).length, 2);
   assert.equal(evaluationBlockers(input).some(b => /Confirm speaker/.test(b)), false);
 });
 test('automatic input counts include every window and both roles for the 200-input cap', () => {
   const recordings = [{ include: true, regions: [], duration: 120.1 }];
   assert.equal(inputCount(recordings, 'both', 'automatic'), 4);
   const blockers = evaluationBlockers({
-    name: 'Large run', profile: { ...automatic, target: 'Warm delivery' }, scope: 'both', speakerMode: 'automatic', consent: true, busy: false, running: false,
+    name: 'Large run', profile: { ...automatic, target: 'Warm delivery' }, scope: 'both', speakerMode: 'automatic', busy: false, running: false,
     config: { configured: true, judges: [{ id: crypto.randomUUID(), name: 'Judge', deployment: 'test' }] },
     recordings: Array.from({ length: 51 }, () => recordings[0]),
   });

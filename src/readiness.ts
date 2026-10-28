@@ -74,7 +74,7 @@ export function evaluationBlockers(input: {
   name: string; profile: Profile; config?: Settings & { configured: boolean };
   recordings: (Reviewable & Pick<Recording, 'include'>)[];
   savedClips?: DraftClip[];
-  scope: Profile['scope']; speakerMode?: Profile['speakerMode']; consent: boolean; busy: boolean; running: boolean;
+  scope: Profile['scope']; speakerMode?: Profile['speakerMode']; busy: boolean; running: boolean;
 }): string[] {
   const blockers: string[] = [];
   const name = testNameSchema.safeParse(input.name);
@@ -102,7 +102,6 @@ export function evaluationBlockers(input: {
   }
   if (!input.savedClips && inputCount(recordings, input.scope, input.speakerMode) > 200)
     blockers.push('Reduce the selection to at most 200 role/audio inputs per evaluation.');
-  if (!input.consent) blockers.push('Tick the permission checkbox to authorize sending selected audio to Azure.');
   if (input.busy) blockers.push('Wait for the current operation to finish.');
   if (input.running) blockers.push('Wait for the running evaluation to finish, or cancel it from Results.');
   return blockers;

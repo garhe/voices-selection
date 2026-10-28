@@ -6,13 +6,15 @@ import {
 import { automaticRegions, base64, browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
 import { applyLanguageHint, newTestProfile, evaluationBlockers, inputCount, recordingReviewed, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
-import { canManageTest, testHistory, testMetadataSchema, testNameMetadata, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
+import { canManageTest, testHistory, testMetadataSchema, testNameMetadata, testTableCsv, TEST_PAGE_SIZE, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
+import { csvCell } from '../shared/csv';
 import { TestLibrary, TestMetadataEditor, type ReportKind } from './TestLibrary';
 import { TestQueue } from './TestQueue';
 import { ConfirmationDialog } from './ConfirmationDialog';
 import { ThemePicker } from './ThemePicker';
 import { RubricEditor } from './RubricEditor';
 import { startPolling } from './polling';
+import { droppedFiles, type ImportedFile } from './import';
 
 type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string };
 type History = TestHistory;
@@ -47,11 +49,6 @@ function exportReportJson(job: Job) {
     ...job, name: evaluationName(job), summary: summarize(job), voiceEvidence: summarizeVoiceEvidence(job),
     improvementGuidance: voiceDirectorBriefs(job),
   }, null, 2), 'application/json');
-}
-function csvCell(value: unknown) {
-  let text = value == null ? '' : String(value);
-  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
-  return `"${text.replaceAll('"', '""')}"`;
 }
 const rubricColumns = ['rubric_preset', 'rubric_revision', 'rubric_snapshot'];
 function rubricCells(profile: Profile) {
@@ -307,8 +304,8 @@ export function App() {
     title: string; description: string; label: string; status: string; run: () => Promise<void>;
   }>();
   const [selectedTestIds, setSelectedTestIds] = useState<string[]>([]);
+  const [testPageSize, setTestPageSize] = useState(TEST_PAGE_SIZE);
   const [confirmBulk, setConfirmBulk] = useState<{ action: BulkTestAction; entries: History[] }>();
-  const [bulkConsent, setBulkConsent] = useState(false);
   const [bulkReport, setBulkReport] = useState<{ action: BulkTestAction; result: BulkTestResult; names: Map<string, string> }>();
   const [selected, setSelected] = useState<string>();
   const [buffer, setBuffer] = useState<AudioBuffer>();
@@ -323,7 +320,6 @@ export function App() {
   const [connectionError, setConnectionError] = useState('');
   const [progressError, setProgressError] = useState('');
   const [busy, setBusy] = useState('');
-  const [consent, setConsent] = useState(false);
   const [languageFilter, setLanguageFilter] = useState('all');
   const folder = useRef<HTMLInputElement>(null);
   const recordingsSection = useRef<HTMLElement>(null);
@@ -407,9 +403,9 @@ export function App() {
     if (job) setConfig(previous => previous ? { ...previous, judges: job.judges.map(judge => ({ ...judge })) } : previous);
     setTestName(''); setRecords([]); setSavedClips(undefined); setDraftSource(undefined);
     setSelected(undefined); setBuffer(undefined); setSourceUrl(''); setPreviewUrl('');
-    setConsent(false); setConfirmDelete(undefined); setTab('setup');
+    setConfirmDelete(undefined); setTab('setup');
     setEditingTest(undefined);
-    setNotice('New test draft ready with the built-in default rubric. Other evaluation settings are kept; recordings and audio permission are cleared. Enter a test name and select a folder. Saved results are unchanged.');
+    setNotice('New test draft ready with the built-in default rubric. Other evaluation settings are kept; recordings are cleared. Enter a test name and select or drop a folder. Saved results are unchanged.');
   }
   function applyLanguageToAll() {
     const language = languageHintSchema.parse(profile.language);
@@ -423,25 +419,24 @@ export function App() {
     setPreviewUrl('');
     updateRecording(current.id, { regions: current.regions.map(r => r.id === id ? { ...r, ...patch, confirmed: false } : r) });
   }
-  function importFiles(files: FileList | null) {
+  function importFiles(files: ImportedFile[] | null) {
     if (!files?.length) return;
-    const audio = [...files].filter(f => /\.(wav|mp3|m4a|ogg|flac|aac|webm|opus)$/i.test(f.name));
+    const audio = files.filter(({ file }) => /\.(wav|mp3|m4a|ogg|flac|aac|webm|opus)$/i.test(file.name));
     if (!audio.length) { setNotice('No supported audio filenames found. Try WAV, MP3, M4A, OGG, FLAC or WebM.'); return; }
-    if (audio.length > 200 || audio.some(f => f.size > 100 * 1024 * 1024)) {
+    if (audio.length > 200 || audio.some(({ file }) => file.size > 100 * 1024 * 1024)) {
       setNotice('Import up to 200 recordings, each no larger than 100 MB.'); return;
     }
-    const entries = audio.map(file => {
-      const relative = file.webkitRelativePath || file.name;
+    const entries = audio.map(({ file, path: relative }) => {
       const parts = relative.split('/');
       return {
         id: crypto.randomUUID(), file, path: relative, voice: parts.length >= 3 ? parts[1] : 'Ungrouped',
-        regions: [], language: 'auto', include: true,
+        regions: [], language: profile.language, include: true,
       };
     });
     setSavedClips(undefined); setDraftSource(undefined);
-    setBuffer(undefined); setSourceUrl(''); setPreviewUrl(''); setConsent(false);
+    setBuffer(undefined); setSourceUrl(''); setPreviewUrl('');
     setRecords(entries); setSelected(entries[0].id);
-    setNotice(`${entries.length} recordings loaded, replacing the previous draft inputs. ${entries.some(e => e.voice === 'Ungrouped') ? 'Files directly in the parent folder are grouped as Ungrouped. Voice subfolders are recommended. ' : ''}Saved evaluations are unchanged. Audio permission must be granted for this selection.`);
+    setNotice(`${entries.length} recordings loaded, replacing the previous draft inputs. ${entries.some(e => e.voice === 'Ungrouped') ? 'Files directly in the parent folder are grouped as Ungrouped. Voice subfolders are recommended. ' : ''}Saved evaluations are unchanged.`);
   }
   async function confirmRegions() {
     if (!current || !buffer) throw new Error('Load the recording first.');
@@ -485,7 +480,7 @@ export function App() {
       clipOverrides: selectedClips?.map(c => ({ id: c.id, voice: c.voice, language: resolveLanguageHint(c.language, profile.language) })),
     });
     if (enqueue) {
-      setTestName(''); setRecords([]); setSelected(undefined); setSavedClips(undefined); setDraftSource(undefined); setConsent(false);
+      setTestName(''); setRecords([]); setSelected(undefined); setSavedClips(undefined); setDraftSource(undefined);
       setProfile(previous => newTestProfile(previous));
       setNotice(`"${name}" added to the queue. Prepare the next test; saved tests run one at a time, even if this browser is closed. Keep the server running.`);
     } else {
@@ -498,11 +493,11 @@ export function App() {
     setTestName(evaluationName(draft.job)); setProfile(withRubric(withLanguageAccent(draft.job.profile), profileRubric(draft.job.profile)));
     setConfig(previous => previous ? { ...previous, judges: draft.job.judges.map(j => ({ ...j })) } : previous);
     setRecords([]); setSelected(undefined); setSavedClips(draft.clips.map(c => ({ ...c, include: true })));
-    setDraftSource(evaluationName(draft.job)); setConsent(false); setTab('setup');
+    setDraftSource(evaluationName(draft.job)); setTab('setup');
     setEditingTest(undefined);
     setNotice(draft.missing
       ? `${draft.missing} saved audio input(s) are missing. Only available audio was copied; re-import originals if needed.`
-      : 'Editable draft created. The combined language/accent field uses the previous accent target when supplied; review it before starting. Authorize the audio to create a new evaluation. Saved results are unchanged.');
+      : 'Editable draft created. The combined language/accent field uses the previous accent target when supplied; review it before starting. Starting creates a new evaluation. Saved results are unchanged.');
   }
   function requestReuseEvaluation(source: Job) {
     setNotice('');
@@ -520,10 +515,15 @@ export function App() {
     setConfirmDelete(undefined);
     setNotice('Evaluation deleted from history. Shared saved audio and your setup draft were kept.');
   }
+  async function exportSelectedTests(entries: History[]) {
+    if (!entries.length) throw new Error('Select at least one test to export.');
+    const jobs = await Promise.all(entries.map(entry => api<Job>(`/api/jobs/${entry.id}`)));
+    download(`selected-tests-${jobs.length}-${Date.now()}.csv`, testTableCsv(jobs), 'text/csv;charset=utf-8');
+    setNotice(`One CSV report download requested for ${jobs.length} selected test${jobs.length === 1 ? '' : 's'}, including every voice score and selections on other pages or hidden by filters.`);
+  }
   async function bulkAction() {
     if (!confirmBulk) throw new Error('Choose tests and a bulk action first.');
     const { action: operation, entries } = confirmBulk;
-    if (operation === 'redo' && !bulkConsent) throw new Error('Authorize the Azure usage before redoing tests.');
     const result = await api<BulkTestResult>('/api/jobs/bulk', {
       action: operation, ids: entries.map(entry => entry.id), ...(operation === 'redo' ? { consent: true } : {}),
     });
@@ -535,7 +535,7 @@ export function App() {
       if (editingTest && succeeded.has(editingTest.id)) setEditingTest(undefined);
     }
     setBulkReport({ action: operation, result, names: new Map(entries.map(entry => [entry.id, entry.name])) });
-    setConfirmBulk(undefined); setBulkConsent(false);
+    setConfirmBulk(undefined);
     await refresh();
   }
   async function openTest(entry: History, regenerate = false) {
@@ -568,7 +568,7 @@ export function App() {
   const rubricChanged = !!job && !!config && job.rubric !== config.rubric;
   const needsReview = job?.results.filter(r => r.assessment && eligibleScore(r.assessment, job.profile) === null).length ?? 0;
   const queueBlockers = evaluationBlockers({
-    name: testName, profile, config, recordings: records, savedClips, scope: profile.scope, speakerMode: profile.speakerMode, consent,
+    name: testName, profile, config, recordings: records, savedClips, scope: profile.scope, speakerMode: profile.speakerMode,
     busy: !!busy, running: false,
   });
   const startBlockers = [...queueBlockers];
@@ -604,11 +604,7 @@ export function App() {
       {busy && <div className="working" role="status"><span className="spinner" /> {busy}</div>}
       {queue && <TestQueue state={queue} busy={!!busy}
         onPause={() => void action('Pausing queue', async () => { setQueue(await api<TestQueueState>('/api/queue/pause', {})); })}
-        onStart={() => { setNotice(''); setConfirmAction({
-          title: 'Start the waiting tests?', description: 'Their saved audio will be sent to the current Azure connection and normal evaluation charges apply.',
-          label: 'Start queue', status: 'Starting queue',
-          run: async () => { setQueue(await api<TestQueueState>('/api/queue/start', { consent: true })); },
-        }); }}
+        onStart={() => void action('Starting queue', async () => { setQueue(await api<TestQueueState>('/api/queue/start', { consent: true })); })}
         onCancel={id => void action('Cancelling test', async () => {
           await api(`/api/jobs/${id}/cancel`, {});
           if (job?.id === id) setJob(await api<Job>(`/api/jobs/${id}`));
@@ -639,14 +635,13 @@ export function App() {
         description={confirmBulk.action === 'delete'
           ? 'Permanently delete these tests and their results? This cannot be undone. Shared saved audio is kept.'
           : 'Create fresh evaluations from each test’s saved audio, guide, language and judging panel, then run them through the queue. Original results are kept. This sends audio to Azure and incurs new evaluation charges.'}
-        busy={!!busy} onCancel={() => { setConfirmBulk(undefined); setBulkConsent(false); }}>
+        busy={!!busy} onCancel={() => setConfirmBulk(undefined)}>
         <p className="hint">This includes selected tests on other pages or hidden by filters. Running and queued tests cannot be changed.</p>
         <ul className="test-bulk-list">{confirmBulk.entries.map(entry => <li key={entry.id}>{entry.name}</li>)}</ul>
-        {confirmBulk.action === 'redo' && <label className="checkbox-label"><input type="checkbox" checked={bulkConsent} disabled={!!busy} onChange={event => setBulkConsent(event.target.checked)} /> I authorize sending these tests’ saved audio to Azure and incurring new evaluation charges.</label>}
         {notice && <p className="error-text" role="alert">{notice}</p>}
-        <div className="button-row"><button className={`secondary ${confirmBulk.action === 'delete' ? 'danger' : ''}`} disabled={!!busy || (confirmBulk.action === 'redo' && !bulkConsent)}
+        <div className="button-row"><button className={`secondary ${confirmBulk.action === 'delete' ? 'danger' : ''}`} disabled={!!busy}
           onClick={() => void action('Applying bulk test action', bulkAction)}>{confirmBulk.action === 'delete' ? 'Confirm deletion' : 'Confirm redo and queue'}</button>
-          <button className="text-button" data-dialog-cancel="" disabled={!!busy} onClick={() => { setConfirmBulk(undefined); setBulkConsent(false); }}>Cancel</button></div>
+          <button className="text-button" data-dialog-cancel="" disabled={!!busy} onClick={() => setConfirmBulk(undefined)}>Cancel</button></div>
       </ConfirmationDialog>}
       {bulkReport && <section className="test-bulk-report" aria-label="Bulk action results">
         <div><strong role="status">{bulkReport.result.succeeded.length} test{bulkReport.result.succeeded.length === 1 ? '' : 's'} {bulkReport.action === 'delete' ? 'deleted' : 'queued for fresh evaluation'} · {bulkReport.result.failed.length} failed</strong>
@@ -661,8 +656,12 @@ export function App() {
         <section className="card test-identity">
           {draftSource && <p className="hint">Editable copy of {draftSource}. Starting creates a new evaluation; the original results stay unchanged.</p>}
           <label><span>Test name <span className="required-mark" aria-hidden="true">*</span></span><input required maxLength={120} value={testName} disabled={!!busy} onChange={e => {
-            const name = e.target.value; setTestName(name); setProfile(previous => withTestNameLanguage(previous, name));
-          }} placeholder="For example: ko-KR Female VTS" /></label>
+            const name = e.target.value;
+            const next = withTestNameLanguage(profile, name);
+            setTestName(name); setProfile(next);
+            setRecords(previous => applyLanguageHint(previous, next.language));
+            setSavedClips(previous => previous === undefined ? undefined : applyLanguageHint(previous, next.language));
+          }} placeholder="For example: ko-KR F VTS" /></label>
         </section>
         <div className="setup-grid">
           <section className="card"><SectionTitle step="01" title="Choose your evaluation" description="Different stages deserve different criteria." />
@@ -681,7 +680,7 @@ export function App() {
               <option value="single">Single speaker</option><option value="agent">Agent only</option><option value="both">Both, scored separately</option>
               {profile.scope === 'customer' && <option value="customer" disabled>Customer only (saved test)</option>}
             </select></label><label>Language / accent<input value={profile.language} maxLength={500} disabled={!!busy} onChange={e => setProfile(withLanguageAccent(profile, e.target.value))} placeholder="auto, British English, Italian for Italy..." /></label></div>
-            <p className="hint" role="status">Language / accent is filled from a single locale code in the test name; you can override it. Accent fit: {activeDimensions(profile).includes('accentFit') ? `on (weight ${dimensionWeight(profile, 'accentFit')})` : 'off (no accent target or excluded by rubric)'}</p>
+            <p className="hint" role="status">Language / accent is filled from a single locale code in the test name and automatically applied to all files, including excluded inputs; changing the name replaces their overrides. You can override it. Accent fit: {activeDimensions(profile).includes('accentFit') ? `on (weight ${dimensionWeight(profile, 'accentFit')})` : 'off (no accent target or excluded by rubric)'}</p>
             <div className="button-row"><button className="secondary" disabled={!!busy || !(savedClips?.length ?? records.length)} onClick={() => void action('Applying language hint', async () => applyLanguageToAll())}>Apply to all recordings</button></div>
             <label className="speaker-mode">Speaker selection<select value={profile.speakerMode ?? 'manual'} disabled={!!busy || savedClips !== undefined} onChange={e => setProfile({ ...profile, speakerMode: e.target.value === 'manual' ? 'manual' : 'automatic' })}>
               <option value="automatic">Automatic — infer roles from conversation content</option>
@@ -729,13 +728,20 @@ export function App() {
             <p className="hint">No fixed judge limit. Each added judge increases Azure usage and concurrent requests; deployment quotas still apply. Use actual deployment names, not display names. Related models can share biases; agreement is not a confidence guarantee.</p>
           </section>
         </div>
-        <section className="card recordings-card" ref={recordingsSection}><div className="section-with-action"><SectionTitle step="03" title="Bring your recordings" description="Parent folder → voice subfolders → audio files. Originals stay untouched." />
-          <input ref={element => { folder.current = element; element?.setAttribute('webkitdirectory', ''); }} type="file" multiple hidden onChange={e => { importFiles(e.target.files); e.target.value = ''; }} />
+        <section className="card recordings-card" ref={recordingsSection}
+          onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; } }}
+          onDrop={event => {
+            event.preventDefault();
+            if (busyRef.current) return;
+            const files = droppedFiles(event.dataTransfer);
+            void action('Reading dropped recordings', async () => importFiles(await files));
+          }}><div className="section-with-action"><SectionTitle step="03" title="Bring your recordings" description="Parent folder → voice subfolders → audio files. Originals stay untouched." />
+          <input ref={element => { folder.current = element; element?.setAttribute('webkitdirectory', ''); }} type="file" multiple hidden onChange={e => { importFiles(Array.from(e.target.files ?? [], file => ({ file, path: file.webkitRelativePath || file.name }))); e.target.value = ''; }} />
           <button className="secondary" disabled={!!busy} onClick={() => {
             if (!folder.current) { setNotice('The folder picker is unavailable. Reload the workbench and try again.'); return; }
             folder.current.value = ''; folder.current.click();
           }}>+ Select folder</button></div>
-          <p className="hint">Selecting a folder replaces the current draft recordings, including reused saved audio. Canceling the picker keeps the current selection. Saved evaluations are never changed.</p>
+          <p className="hint">Drop a parent folder here to import without the folder picker’s browser trust prompt. Select folder remains available; its browser-required prompt cannot be disabled. Importing replaces the current draft inputs. Canceling the picker keeps the current selection. Saved evaluations are never changed.</p>
           {savedClips !== undefined ? <>
             <p className="hint">Reusing saved audio inputs, not the original full recordings. Original ranges, channels and speaker-selection mode are preserved. You can change voices and language hints or exclude inputs. Keep the required roles for each recording; select a folder to replace these inputs and edit ranges or speaker mode.</p>
             {!savedClips.length && <p role="alert">No saved audio is available. Select the original folder to continue.</p>}
@@ -745,7 +751,7 @@ export function App() {
                 <label>Saved input language hint<input value={c.language} maxLength={500} disabled={!!busy} onChange={e => setSavedClips(old => old?.map(value => value.id === c.id ? { ...value, language: e.target.value } : value))} /></label></div>
               <audio controls preload="none" src={`/api/clips/${c.id}/audio`} aria-label={`Saved input ${c.file} ${c.role}`} />
             </div>)}
-          </> : !records.length ? <button className="dropzone" onClick={() => folder.current?.click()}><span className="folder-icon">▱</span><strong>Select your voice collection</strong><span>WAV, MP3, M4A, OGG, FLAC, WebM · Browser codec support varies</span><small>Recordings are not sent to Azure until you start an evaluation.</small></button> :
+          </> : !records.length ? <button className="dropzone" disabled={!!busy} onClick={() => folder.current?.click()}><span className="folder-icon">▱</span><strong>Drop a folder or select your voice collection</strong><span>WAV, MP3, M4A, OGG, FLAC, WebM · Browser codec support varies</span><small>Recordings are not sent to Azure until you start an evaluation.</small></button> :
             <><div className="collection-bar"><span><strong>{voiceCount}</strong> voices <b>·</b> <strong>{included.length}</strong> recordings {profile.speakerMode !== 'automatic' && <><b>·</b> <strong>{confirmed}</strong> reviewed</>}</span><span>{profile.speakerMode === 'automatic' ? 'Automatic role listening — no file confirmations needed' : 'Review speaker regions before running'}</span></div>
               <div className="recording-workspace"><div className="file-list">{records.map(r => <div key={r.id} className={`file-row ${r.id === selected ? 'selected' : ''}`}>
                 <input aria-label={`Include ${r.path}`} type="checkbox" checked={r.include} onChange={e => updateRecording(r.id, { include: e.target.checked })} />
@@ -784,7 +790,6 @@ export function App() {
                 </>}</div></div></>}
         </section>
         <section className="run-card"><div><h3>Ready for a closer listen?</h3><p>{profile.speakerMode === 'automatic' && included.some(r => r.duration === undefined) ? 'At least ' : ''}{plannedInputs} role/audio inputs × {config?.judges.length ?? 0} judges. {profile.scope === 'both' && 'Both roles use separate assessments of the same conversation. '}Azure usage is billed per your deployment; no cost estimate is available.</p>
-          <label className="checkbox-label"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /> I have permission to send these audio inputs to my configured Azure resource.</label>
           <small>Automatic mode sends conversation windows; manual mode sends selected excerpts. Missing-audio claims, zero audio-token responses or exhausted format retries may trigger one fresh-session re-upload. Each session allows one format retry, within a total 180-second deadline. Retries incur additional Azure usage and never force scores. Audio inputs, names, ratings and results persist unencrypted on this computer. No transcript is requested or stored.</small>
           <div id="evaluation-readiness" className={`evaluation-readiness ${queueBlockers.length ? '' : 'ready'}`} role="status" aria-live="polite">
             {queueBlockers.length ? <><strong>Before you can start or queue</strong><ul>{queueBlockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul></> : <strong>Ready to start or add to queue.</strong>}
@@ -797,8 +802,9 @@ export function App() {
             <button className="secondary" disabled={startBlockers.length > 0} title={startBlockers.length ? startBlockers.join(' ') : 'Start the evaluation'} aria-describedby="evaluation-readiness" onClick={() => void action('Preparing evaluation', () => start())}>Start evaluation <span>→</span></button></div></section>
         <p className="disclaimer">AI opinion scores are not validated MOS. This version does not include a dedicated MOS predictor, automatic diarization or a human listening panel.</p>
       </> : <>
-        <div hidden={!showTestList}><TestLibrary entries={history} busy={!!busy} selectedIds={selectedTestIds} onSelectionChange={setSelectedTestIds}
-          onBulkAction={(operation, entries) => { setConfirmBulk({ action: operation, entries }); setBulkConsent(false); setBulkReport(undefined); setNotice(''); }}
+        <div hidden={!showTestList}><TestLibrary entries={history} busy={!!busy} pageSize={testPageSize} onPageSizeChange={setTestPageSize} selectedIds={selectedTestIds} onSelectionChange={setSelectedTestIds}
+          onExportSelected={entries => void action('Exporting selected report', () => exportSelectedTests(entries))}
+          onBulkAction={(operation, entries) => { setConfirmBulk({ action: operation, entries }); setBulkReport(undefined); setNotice(''); }}
           onOpen={entry => void action('Loading evaluation', () => openTest(entry))}
           onEdit={entry => void action('Loading test details', async () => { setEditingTest(await api<Job>(`/api/jobs/${entry.id}`)); })}
           onDelete={entry => { setConfirmDelete(entry); setNotice(''); }}
@@ -816,13 +822,13 @@ export function App() {
             <button className="text-button danger" disabled={!!busy || ['running', 'queued'].includes(job.status)} onClick={() => { setConfirmDelete(testHistory(job)); setNotice(''); }}>Delete</button>
             <button className="text-button" disabled={!!busy} onClick={() => void action('Refreshing results', async () => { setJob(await api<Job>(`/api/jobs/${job.id}`)); await refresh(); })}>Refresh results</button>
             {['running', 'queued'].includes(job.status) ? <button className="text-button danger" disabled={!!busy} onClick={() => void action('Cancelling evaluation', async () => { await api(`/api/jobs/${job.id}/cancel`, {}); setJob(await api<Job>(`/api/jobs/${job.id}`)); await refresh(); })}>Cancel</button> :
-              job.results.some(r => r.status !== 'completed') && <button className="secondary" disabled={!consent || !!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit inputs to create a new evaluation.' : 'Requires Azure audio permission from setup'} onClick={() => void action('Resuming evaluation', async () => {
-                setJob(await api<Job>(`/api/jobs/${job.id}/resume`, { consent })); await refresh();
+              job.results.some(r => r.status !== 'completed') && <button className="secondary" disabled={!!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit inputs to create a new evaluation.' : 'Retry incomplete judges; additional Azure usage applies'} onClick={() => void action('Resuming evaluation', async () => {
+                setJob(await api<Job>(`/api/jobs/${job.id}/resume`, { consent: true })); await refresh();
               })}>Retry incomplete judges</button>}
-            {!['running', 'queued'].includes(job.status) && audioIssues > 0 && <button className="secondary" disabled={!consent || !!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit inputs to create a new evaluation.' : 'Retry only missing-audio claims'} onClick={() => void action('Retrying suspected audio-input issues', async () => {
-              setJob(await api<Job>(`/api/jobs/${job.id}/resume`, { consent, retryAudioIssues: true })); await refresh();
+            {!['running', 'queued'].includes(job.status) && audioIssues > 0 && <button className="secondary" disabled={!!busy || !config || rubricChanged} title={rubricChanged ? 'The rubric changed. Use Edit inputs to create a new evaluation.' : 'Retry only missing-audio claims; additional Azure usage applies'} onClick={() => void action('Retrying suspected audio-input issues', async () => {
+              setJob(await api<Job>(`/api/jobs/${job.id}/resume`, { consent: true, retryAudioIssues: true })); await refresh();
             })}>Retry audio-input issues ({audioIssues})</button>}</div>
-          {!['running', 'queued'].includes(job.status) && !rubricChanged && (audioIssues > 0 || job.results.some(r => r.status !== 'completed')) && <label className="checkbox-label resume-consent"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /> I authorize resending the selected retry inputs to Azure, including bounded automatic recovery. Retried assessments incur new usage. Previous results are retained in the audit history.</label>}
+          {!['running', 'queued'].includes(job.status) && !rubricChanged && (audioIssues > 0 || job.results.some(r => r.status !== 'completed')) && <p className="hint">Retrying sends the selected inputs to Azure, including bounded automatic recovery, and incurs new usage. Previous results are retained in the audit history.</p>}
           {audioIssues > 0 && !rubricChanged && <div className="callout">{audioIssues} assessments claim missing audio. This is distinct from genuine silence, unsupported language or uncertain roles. Use Retry audio-input issues to recheck only these completed verdicts; other completed assessments are preserved.</div>}
           {job.rubric === RUBRIC_VERSION
             ? <div className="callout"><strong>Voice-persona rubric:</strong> scores concern audible tone, emotion, vocal character and pleasant, effortless listening, not script logic or service-task quality. Meaning is used only for speaker-role attribution.</div>

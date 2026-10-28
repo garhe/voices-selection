@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { evaluationName, voiceGenders, type Job, type VoiceLabel } from '../shared/domain';
-import { canManageTest, defaultTestFilters, queryTests, testNameMetadata, TEST_PAGE_SIZE, type BulkTestAction, type TestFilters, type TestHistory } from '../shared/history';
+import { canManageTest, defaultTestFilters, queryTests, testNameMetadata, TEST_PAGE_SIZES, type BulkTestAction, type TestFilters, type TestHistory } from '../shared/history';
 import { TestActions, type ReportKind } from './TestActions';
 import { DatePicker } from './DatePicker';
 
 export type { ReportKind } from './TestActions';
-export function TestLibrary({ entries, busy, selectedIds, onSelectionChange, onBulkAction, onOpen, onEdit, onDelete, onDownload, onRegenerate, onRefresh }: {
+export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selectedIds, onSelectionChange, onExportSelected, onBulkAction, onOpen, onEdit, onDelete, onDownload, onRegenerate, onRefresh }: {
   entries: TestHistory[]; busy: boolean;
+  pageSize: number; onPageSizeChange: (size: number) => void;
   selectedIds: string[]; onSelectionChange: (ids: string[]) => void;
+  onExportSelected: (entries: TestHistory[]) => void;
   onBulkAction: (action: BulkTestAction, entries: TestHistory[]) => void;
   onOpen: (entry: TestHistory) => void; onEdit: (entry: TestHistory) => void;
   onDelete: (entry: TestHistory) => void; onDownload: (entry: TestHistory, kind: ReportKind) => void;
@@ -16,7 +18,7 @@ export function TestLibrary({ entries, busy, selectedIds, onSelectionChange, onB
   const [filters, setFilters] = useState<TestFilters>({ ...defaultTestFilters });
   const [page, setPage] = useState(1);
   const [dateReset, setDateReset] = useState(0);
-  const results = queryTests(entries, filters, page);
+  const results = queryTests(entries, filters, page, pageSize);
   const selectionControl = useRef<HTMLInputElement>(null);
   const selected = entries.filter(entry => selectedIds.includes(entry.id) && canManageTest(entry));
   const selectedSet = new Set(selected.map(entry => entry.id));
@@ -37,7 +39,7 @@ export function TestLibrary({ entries, busy, selectedIds, onSelectionChange, onB
   const dateError = filters.dateFrom && filters.dateTo && filters.dateFrom > filters.dateTo;
   return <>
     <div className="page-title test-library-title"><div><h1>Test Reports</h1>
-      <p className="muted">Open a test for details. Use Actions to edit, download or rerun reports.</p></div>
+      <p className="muted">Select tests, then choose Export selected report to download one CSV table with separate voice-name, overall-score and per-judge average-score columns, including selections on other pages or hidden by filters.</p></div>
       <button className="secondary" disabled={busy} onClick={onRefresh}>Refresh tests</button>
     </div>
     <section className="card test-library" aria-label="Saved tests">
@@ -58,9 +60,10 @@ export function TestLibrary({ entries, busy, selectedIds, onSelectionChange, onB
         </select></label>
       </div>
       {dateError && <p className="error-text" role="alert">From date must be on or before To date.</p>}
-      <div className="test-list-meta"><p className="test-count" role="status">{results.total} of {entries.length} tests{results.total > 0 && ` · ${(results.page - 1) * TEST_PAGE_SIZE + 1}-${Math.min(results.page * TEST_PAGE_SIZE, results.total)} shown`}</p>
+      <div className="test-list-meta"><p className="test-count" role="status">{results.total} of {entries.length} tests{results.total > 0 && ` · ${(results.page - 1) * pageSize + 1}-${Math.min(results.page * pageSize, results.total)} shown`}</p>
         {!!selected.length && <div className="test-bulk-actions" aria-label="Selected test actions">
           <span role="status" title="Selection is kept across pages and filters.">{selected.length} selected</span>
+          <button className="text-button" disabled={busy} onClick={() => onExportSelected(selected)}>Export selected report</button>
           <button className="text-button danger" disabled={busy} onClick={() => onBulkAction('delete', selected)}>Delete selected</button>
           <button className="text-button" disabled={busy} onClick={() => onBulkAction('redo', selected)}>Redo selected</button>
           <button className="text-button" disabled={busy} onClick={() => onSelectionChange([])}>Clear selection</button>
@@ -69,14 +72,14 @@ export function TestLibrary({ entries, busy, selectedIds, onSelectionChange, onB
       </div>
       <div className="table-scroll test-table-scroll" tabIndex={0} aria-label="Saved test list">
         <table className="test-table">
-          <caption className="sr-only">Saved evaluations, up to 30 tests per page</caption>
+          <caption className="sr-only">Saved evaluations, up to {pageSize} tests per page</caption>
           <thead><tr><th scope="col" className="test-select"><input ref={selectionControl} type="checkbox" aria-label="Select all eligible tests on this page"
             disabled={busy || !eligibleOnPage.length} checked={eligibleOnPage.length > 0 && checkedOnPage === eligibleOnPage.length}
             onChange={event => select(eligibleOnPage.map(entry => entry.id), event.target.checked)} /></th>
             <th scope="col">Test name</th><th scope="col">Test time</th><th scope="col">Best voice</th><th scope="col">Best score</th><th scope="col">Language</th><th scope="col">Gender</th><th scope="col">Actions</th></tr></thead>
           <tbody>{results.entries.map(entry => <tr key={entry.id}>
             <td className="test-select"><input type="checkbox" aria-label={`Select test ${entry.name}`} checked={selectedSet.has(entry.id)}
-              disabled={busy || !canManageTest(entry)} title={canManageTest(entry) ? 'Select for bulk actions' : 'Running and queued tests cannot be deleted or redone'}
+              disabled={busy || !canManageTest(entry)} title={canManageTest(entry) ? 'Select for report export or bulk actions' : 'Running and queued tests cannot be deleted or redone'}
               onChange={event => select([entry.id], event.target.checked)} /></td>
             <td data-label="Test name"><button className="test-name" title={entry.name} disabled={busy} onClick={() => onOpen(entry)}>{entry.name}</button>
               <div className="test-row-meta"><span title={entry.stage === 'audition' ? 'Voice Selection' : 'TTS evaluation'}>{entry.clips} excerpts</span>
@@ -102,10 +105,13 @@ export function TestLibrary({ entries, busy, selectedIds, onSelectionChange, onB
         </table>
       </div>
       <nav className="test-pagination" aria-label="Test pages">
+        <label>Tests per page<select value={pageSize} onChange={event => { onPageSizeChange(Number(event.target.value)); setPage(1); }}>
+          {TEST_PAGE_SIZES.map(size => <option key={size} value={size}>{size}</option>)}
+        </select></label>
         <button className="secondary" disabled={results.page === 1} onClick={() => setPage(results.page - 1)}>Previous page</button>
         <label>Page<select aria-label="Test page" value={results.page} onChange={event => setPage(Number(event.target.value))}>
           {Array.from({ length: results.pages }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}</option>)}
-        </select></label><span>of {results.pages} · 30 per page</span>
+        </select></label><span>of {results.pages} · {pageSize} per page</span>
         <button className="secondary" disabled={results.page === results.pages} onClick={() => setPage(results.page + 1)}>Next page</button>
       </nav>
     </section>
@@ -124,7 +130,7 @@ export function TestMetadataEditor({ job, busy, onSave, onCancel }: {
   const metadata = testNameMetadata(name);
   return <section ref={editor} className="card test-metadata" role="region" aria-labelledby="edit-test-title">
     <h2 id="edit-test-title">Edit test details</h2>
-    <p className="hint">Language and gender in the test list come from this name, for example "en-GB Female VTS". Rename the test to update them. Audio, scores, test time, saved voice labels and assessments stay unchanged. To change evaluation inputs, open the test and use Edit inputs.</p>
+    <p className="hint">Language and gender in the test list come from this name, for example "en-GB F VTS". Use M/F or Male/Female as separate tokens. Rename the test to update them. Audio, scores, test time, saved voice labels and assessments stay unchanged. To change evaluation inputs, open the test and use Edit inputs.</p>
     <form onSubmit={event => { event.preventDefault(); onSave(name, job.voiceLabels ?? []); }}>
       <label>Test name<input required maxLength={120} value={name} disabled={busy} onChange={event => setName(event.target.value)} /></label>
       <div className="name-metadata" aria-live="polite"><p><strong>Language from name:</strong> {metadata.languages.join(', ') || 'Not specified'}</p>

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { testHistory, testNameMetadata, queryTests, defaultTestFilters, testMetadataSchema, type TestHistory } from '../shared/history.js';
-import { clip, job } from './fixtures.js';
+import { testHistory, testNameMetadata, queryTests, defaultTestFilters, testMetadataSchema, testTableCsv, TEST_PAGE_SIZES, type TestHistory } from '../shared/history.js';
+import { csvCell } from '../shared/csv.js';
+import { assessment, clip, job } from './fixtures.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TestLibrary } from '../src/TestLibrary.js';
@@ -102,7 +103,9 @@ test('workspace omits the preview badge and redundant bottom footer without disa
   const html = renderToStaticMarkup(createElement(App));
   assert.equal(html.includes('MULTI-JUDGE PREVIEW'), false);
   assert.equal(html.includes('<footer>'), false);
-  assert.ok(html.includes('I have permission to send these audio inputs'));
+  assert.equal(html.includes('I have permission to send these audio inputs'), false);
+  assert.ok(html.includes('Azure usage is billed per your deployment'));
+  assert.ok(html.includes('Drop a folder or select your voice collection'));
   assert.ok(html.includes('AI opinion scores are not validated MOS'));
   assert.match(html, /<option value="single">Single speaker<\/option>/);
   assert.match(html, /<option value="agent" selected="">Agent only<\/option>/);
@@ -275,13 +278,17 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   values[60].bestVoices = ['Talent 60', 'Tied talent B', 'Tied talent C'].map(voice => ({ voice, role: 'speaker' }));
   const noop = () => {};
   const html = renderToStaticMarkup(createElement(TestLibrary, {
-    entries: values, busy: false, selectedIds: [], onSelectionChange: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
+    entries: values, busy: false, pageSize: 30, onPageSizeChange: noop, selectedIds: [], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
     onDownload: noop, onRegenerate: noop, onRefresh: noop,
   }));
   const body = html.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1];
   assert.match(html, /<h1>Test Reports<\/h1>/);
   assert.ok(body);
   assert.equal((body.match(/<tr>/g) ?? []).length, 30);
+  assert.match(html, /Tests per page<select/);
+  for (const size of TEST_PAGE_SIZES) assert.match(html, new RegExp(`<option value="${size}"[^>]*>${size}</option>`));
+  assert.match(html, /separate voice-name, overall-score and per-judge average-score columns/);
+  assert.doesNotMatch(html, />Export selected report<\/button>/);
   assert.equal((body.match(/class="secondary test-action-button"/g) ?? []).length, 30);
   assert.equal((body.match(/aria-haspopup="menu"/g) ?? []).length, 30);
   assert.equal((body.match(/popover="auto" role="menu"/g) ?? []).length, 30);
@@ -311,6 +318,24 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   assert.equal((body.match(/data-action="delete" class="danger" disabled=""/g) ?? []).length, 2);
   for (const action of ['edit', 'rerun', 'delete', 'json', 'assessments', 'voices', 'guidance'])
     assert.equal((body.match(new RegExp(`data-action="${action}"`, 'g')) ?? []).length, 30);
+});
+
+test('report page size controls, row counts, captions and ranges agree for every supported choice', () => {
+  const noop = () => {};
+  for (const size of TEST_PAGE_SIZES) {
+    const html = renderToStaticMarkup(createElement(TestLibrary, {
+      entries: entries(65), busy: false, pageSize: size, onPageSizeChange: noop,
+      selectedIds: ['64'], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
+      onDownload: noop, onRegenerate: noop, onRefresh: noop,
+    }));
+    const body = html.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1];
+    assert.ok(body);
+    assert.equal((body.match(/<tr>/g) ?? []).length, size);
+    assert.ok(html.includes(`Saved evaluations, up to ${size} tests per page`));
+    assert.ok(html.includes(`1-${size} shown`));
+    assert.match(html, new RegExp(`<option value="${size}" selected="">${size}</option>`));
+    assert.match(html, /1 selected/);
+  }
 });
 
 test('the themed action menu disables its trigger and every action during an operation', () => {
@@ -359,13 +384,14 @@ test('bulk selection counts eligible tests across pages and excludes running and
   values[59].status = 'running'; values[58].status = 'queued';
   const noop = () => {};
   const html = renderToStaticMarkup(createElement(TestLibrary, {
-    entries: values, busy: false, selectedIds: ['0', '60', '59', '58', 'deleted'],
-    onSelectionChange: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
+    entries: values, busy: false, pageSize: 30, onPageSizeChange: noop, selectedIds: ['0', '60', '59', '58', 'deleted'],
+    onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
     onDownload: noop, onRegenerate: noop, onRefresh: noop,
   }));
   assert.match(html, /2 selected/);
   assert.match(html, /Delete selected/);
   assert.match(html, /Redo selected/);
+  assert.match(html, /<div class="test-bulk-actions"[^>]*>[\s\S]*?>Export selected report<\/button>/);
   assert.match(html, /Clear selection/);
   assert.match(html, /aria-label="Select test Test 61"[^>]*checked=""/);
   assert.equal((html.match(/aria-label="Select test [^"]*"[^>]*checked=""/g) ?? []).length, 1);
@@ -395,12 +421,18 @@ test('name extraction handles existing locale names, compact locales, case and s
     ['ms-MY Male VTS', 'ms-MY', 'Male'],
     ['fr-FR Male VTS', 'fr-FR', 'Male'],
     ['EN_gb_fEmAlE_VTS', 'en-GB', 'Female'],
+    ['en-GB F VTS', 'en-GB', 'Female'],
+    ['thTH M Cartesia', 'th-TH', 'Male'],
+    ['ko-KR_f_VTS', 'ko-KR', 'Female'],
+    ['fr-FR-m-round2', 'fr-FR', 'Male'],
     ['zh-Hant-TW Non-binary round 2', 'zh-Hant-TW', 'Other'],
   ]) assert.deepEqual(testNameMetadata(name), { languages: [language], genders: [gender] }, name);
   assert.deepEqual(testNameMetadata('Female audition'), { languages: [], genders: ['Female'] }, 'Female must not also match Male.');
   assert.deepEqual(testNameMetadata('Retail test'), { languages: [], genders: ['Unspecified'] });
   assert.deepEqual(testNameMetadata('en-GB en_GB Female Male'), { languages: ['en-GB'], genders: ['Female', 'Male'] });
   assert.deepEqual(testNameMetadata('NotFemale malevolent xx-YY'), { languages: [], genders: ['Unspecified'] });
+  assert.deepEqual(testNameMetadata('en-US M/F'), { languages: ['en-US'], genders: ['Female', 'Male'] });
+  assert.deepEqual(testNameMetadata('FM M2 F1 format'), { languages: [], genders: ['Unspecified'] });
 });
 
 test('name-derived metadata drives filters and refreshes when the test is renamed', () => {
@@ -442,6 +474,165 @@ test('search and combined filters apply before pagination and search all saved t
   assert.equal(queryTests(values, { ...defaultTestFilters, search: 'Talent 64' }, 1).total, 1);
   assert.equal(queryTests(values, { ...defaultTestFilters, search: 'Italian', gender: 'Female' }, 1).total, 0);
   assert.equal(queryTests(values, { ...defaultTestFilters, gender: 'Unspecified' }, 1).total, 0);
+});
+
+test('pagination supports exactly 30, 40 and 50 rows with global filtering and stale-page clamping', () => {
+  const values = entries(101);
+  for (const size of TEST_PAGE_SIZES) {
+    const first = queryTests(values, defaultTestFilters, 1, size);
+    assert.equal(first.entries.length, size);
+    assert.equal(first.pages, Math.ceil(values.length / size));
+    const all = Array.from({ length: first.pages }, (_, index) =>
+      queryTests(values, defaultTestFilters, index + 1, size).entries).flat();
+    assert.equal(all.length, values.length);
+    assert.equal(new Set(all.map(entry => entry.id)).size, values.length);
+    assert.deepEqual(all.map(entry => entry.id), [...values].reverse().map(entry => entry.id));
+    assert.equal(queryTests(values.slice(0, size), defaultTestFilters, 99, size).page, 1);
+    const filtered = queryTests(values, { ...defaultTestFilters, gender: 'Female' }, 99, size);
+    assert.equal(filtered.total, 50);
+    assert.equal(filtered.page, Math.ceil(50 / size));
+    assert.ok(filtered.entries.every(entry => entry.genders.includes('Female')));
+    const empty = queryTests([], defaultTestFilters, 99, size);
+    assert.deepEqual([empty.entries.length, empty.pages, empty.page], [0, 1, 1]);
+  }
+  for (const size of [0, 29, 31, 41, 51, 100, NaN, Infinity])
+    assert.throws(() => queryTests(values, defaultTestFilters, 1, size), /30, 40 or 50/);
+});
+
+function csvTable(csv: string) {
+  const rows = csv.replace(/^\uFEFF/, '').split('\r\n').map(row =>
+    [...row.matchAll(/"((?:[^"]|"")*)"(?=,|$)/g)].map(match => match[1].replaceAll('""', '"')));
+  const [headers, ...data] = rows;
+  assert.equal(new Set(headers).size, headers.length, 'Column headers must be unique.');
+  for (const row of data) assert.equal(row.length, headers.length, 'Every test row must match the dynamic column count.');
+  return { headers, rows: data.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index]]))) };
+}
+
+test('selected-test CSV separates names, overall scores and judge scores for tied and other voices', () => {
+  const scored = job([
+    clip({ voice: 'Winner' }), clip({ voice: 'Tied, "voice"', role: 'agent' }),
+    clip({ voice: 'Other' }), clip({ voice: 'Unassessed' }),
+  ], [4]);
+  scored.name = 'en-GB F, "round 2"';
+  scored.results[2].assessment = { ...scored.results[2].assessment!, scores: {
+    ...scored.results[2].assessment!.scores, naturalness: 2, articulation: 2, pace: 2, expressiveness: 2,
+  } };
+  scored.results[3].status = 'failed';
+  const unscored = job([clip({ voice: 'Only voice' })], [4]);
+  unscored.name = 'No metadata';
+  unscored.results[0].status = 'failed';
+  const values = [scored, unscored];
+  const snapshot = JSON.stringify(values);
+  const csv = testTableCsv(values);
+  const table = csvTable(csv);
+  assert.equal(table.headers.length, 16, 'Four metadata columns and four voice groups of three columns.');
+  assert.ok(table.headers.every(header => !/\brole\b/i.test(header)), 'No role columns are exported.');
+  const [first, second] = table.rows;
+  assert.equal(first['Test name'], scored.name);
+  assert.equal(first['Test time'], scored.createdAt);
+  assert.equal(first.Locale, 'en-GB');
+  assert.equal(first.Gender, 'Female');
+  assert.equal(first['Best voice 1 name'], 'Tied, "voice"');
+  assert.equal(first['Best voice 1 overall score'], '4.00');
+  assert.equal(first['Best voice 1 - Judge 1 (deployment-0) average score'], '4.00');
+  assert.equal(first['Best voice 2 name'], 'Winner');
+  assert.equal(first['Other voice 1 name'], 'Other');
+  assert.equal(first['Other voice 1 overall score'], '2.00');
+  assert.equal(first['Other voice 1 - Judge 1 (deployment-0) average score'], '2.00');
+  assert.equal(first['Other voice 2 name'], 'Unassessed');
+  assert.equal(first['Other voice 2 overall score'], 'Not assessed');
+  assert.equal(first['Other voice 2 - Judge 1 (deployment-0) average score'], 'Not assessed');
+  assert.equal(second['Best voice 1 name'], '');
+  assert.equal(second['Best voice 1 overall score'], 'Not assessed');
+  assert.equal(second['Best voice 2 overall score'], '');
+  assert.equal(second['Other voice 1 name'], 'Only voice');
+  assert.equal(second['Other voice 2 name'], '');
+  assert.equal(second.Locale, 'Not specified');
+  assert.equal(second.Gender, 'Unspecified');
+  assert.equal(testTableCsv(Array.from({ length: 65 }, () => scored)).split('\r\n').length, 66, 'Exports are not limited to the visible page.');
+  assert.equal(testTableCsv([]), '\uFEFF"Test name","Test time","Locale","Gender","Best voice name","Best voice overall score"');
+  assert.equal(JSON.stringify(values), snapshot);
+  const only = job([clip({ voice: 'Only winner' })], [5]);
+  const single = csvTable(testTableCsv([only]));
+  assert.equal(single.rows[0]['Best voice name'], 'Only winner');
+  assert.equal(single.rows[0]['Best voice overall score'], '5.00');
+  assert.ok(single.headers.every(header => !header.startsWith('Other voice')));
+});
+
+test('selected reports preserve per-judge duration-weighted regions and equal recording averages', () => {
+  const value = job([
+    clip({ file: 'a.wav', start: 0, end: 1 }),
+    clip({ file: 'a.wav', start: 1, end: 4 }),
+    clip({ file: 'b.wav', start: 0, end: 1 }),
+  ], [4, 4]);
+  const scores = [2, 4, 4, 2, 1, 5];
+  value.results.forEach((result, index) => { result.assessment = assessment(scores[index]); });
+  const row = csvTable(testTableCsv([value])).rows[0];
+  assert.equal(row['Best voice overall score'], '3.00');
+  assert.equal(row['Best voice - Judge 1 (deployment-0) average score'], '2.25');
+  assert.equal(row['Best voice - Judge 2 (deployment-1) average score'], '3.75');
+});
+
+test('every ranked other voice exports its overall score separately from its name and judge averages', () => {
+  const value = job([
+    clip({ voice: 'Winner' }), clip({ voice: 'Runner up' }), clip({ voice: 'Third voice' }),
+  ], [5, 5]);
+  const scores = [5, 5, 4, 3, 2, 1];
+  value.results.forEach((result, index) => { result.assessment = assessment(scores[index]); });
+  const table = csvTable(testTableCsv([value]));
+  assert.ok(table.headers.every(header => !/\brole\b/i.test(header)));
+  const [row] = table.rows;
+  assert.equal(row['Other voice 1 name'], 'Runner up');
+  assert.equal(row['Other voice 1 overall score'], '3.50');
+  assert.equal(row['Other voice 1 - Judge 1 (deployment-0) average score'], '4.00');
+  assert.equal(row['Other voice 1 - Judge 2 (deployment-1) average score'], '3.00');
+  assert.equal(row['Other voice 2 name'], 'Third voice');
+  assert.equal(row['Other voice 2 overall score'], '1.50');
+  assert.equal(row['Other voice 2 - Judge 1 (deployment-0) average score'], '2.00');
+  assert.equal(row['Other voice 2 - Judge 2 (deployment-1) average score'], '1.00');
+});
+
+test('judge columns align saved names and deployments across IDs and separate different deployments and duplicates', () => {
+  const first = job([clip()], [4, 2]);
+  const second = job([clip()], [5, 3]);
+  second.judges[0].name = first.judges[0].name;
+  second.judges[1].name = first.judges[0].name;
+  second.judges[1].deployment = 'different-deployment';
+  const duplicate = job([clip()], [4, 2]);
+  duplicate.judges[1].name = duplicate.judges[0].name;
+  duplicate.judges[1].deployment = duplicate.judges[0].deployment;
+  const table = csvTable(testTableCsv([first, second, duplicate]));
+  assert.equal(table.rows[0]['Best voice - Judge 1 (deployment-0) average score'], '4.00');
+  assert.equal(table.rows[1]['Best voice - Judge 1 (deployment-0) average score'], '5.00');
+  assert.equal(table.rows[1]['Best voice - Judge 1 (different-deployment) average score'], '3.00');
+  assert.equal(table.rows[1]['Best voice - Judge 2 (deployment-1) average score'], '');
+  assert.equal(table.rows[0]['Best voice - Judge 1 (deployment-0) #2 average score'], '');
+  assert.equal(table.rows[2]['Best voice - Judge 1 (deployment-0) #2 average score'], '2.00');
+});
+
+test('per-judge report scores remain visible when missing panel evidence prevents an overall score', () => {
+  const value = job([clip({ voice: 'Partial voice' })], [4, 2]);
+  value.results[1].status = 'failed';
+  const row = csvTable(testTableCsv([value])).rows[0];
+  assert.equal(row['Best voice overall score'], 'Not assessed');
+  assert.equal(row['Other voice 1 name'], 'Partial voice');
+  assert.equal(row['Other voice 1 overall score'], 'Not assessed');
+  assert.equal(row['Other voice 1 - Judge 1 (deployment-0) average score'], '4.00');
+  assert.equal(row['Other voice 1 - Judge 2 (deployment-1) average score'], 'Not assessed');
+});
+
+test('CSV cell escaping preserves spreadsheet safety for existing reports and selected-test tables', () => {
+  for (const value of ['=1+1', '+formula', '-formula', '@formula', '\tformula', '\rformula'])
+    assert.equal(csvCell(value), `"${`'${value}`}"`);
+  assert.equal(csvCell('comma, quote" and\nnewline'), '"comma, quote"" and\nnewline"');
+  assert.equal(csvCell(undefined), '""');
+  assert.equal(csvCell(null), '""');
+  assert.equal(csvCell(4.5), '"4.5"');
+  const value = job([clip({ voice: '@unsafe' })], [4]);
+  value.name = '=1+1';
+  const csv = testTableCsv([value]);
+  assert.ok(csv.includes(`"'=1+1"`));
+  assert.ok(csv.includes(`"'@unsafe"`));
 });
 
 test('date filtering includes both full boundary days in local time', () => {

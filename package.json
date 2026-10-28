@@ -11,7 +11,7 @@
     "dev": "tsx server/index.ts",
     "build": "tsc --noEmit && vite build",
     "start": "tsx server/index.ts --production",
-    "test": "tsx --test tests/domain.test.ts tests/history.test.ts tests/api.test.ts tests/queue.test.ts tests/realtime.test.ts tests/connection.test.ts tests/readiness.test.ts tests/automatic.test.ts tests/store.test.ts tests/autostart.test.ts tests/polling.test.ts"
+    "test": "tsx --test tests/domain.test.ts tests/history.test.ts tests/api.test.ts tests/queue.test.ts tests/realtime.test.ts tests/connection.test.ts tests/readiness.test.ts tests/automatic.test.ts tests/store.test.ts tests/autostart.test.ts tests/polling.test.ts tests/import.test.ts"
   },
   "dependencies": {
     "dotenv": "^16.5.0",
