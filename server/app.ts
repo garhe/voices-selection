@@ -4,7 +4,7 @@ import path from 'node:path';
 import { z, ZodError } from 'zod';
 import {
   clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, resolveLanguageHint, testNameSchema, evaluationName, retryableAudioIssue, SAMPLE_RATE, MAX_SECONDS, RUBRIC_VERSION,
-  type Job, type Profile, type StoredClip, type TestQueueState,
+  type Job, type Profile, type StoredClip, type TestQueueState, type JudgeResult, unassessedInputs,
   rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, type Rubric,
 } from '../shared/domain.js';
 import { measurements, wav } from './audio.js';
@@ -12,9 +12,16 @@ import { judgeAudio, JudgeAudioError, testRealtimeConnection } from './realtime.
 import { Store } from './store.js';
 import { Connection, type Credentials } from './credentials.js';
 import { testHistory, testMetadataSchema, canManageTest, type BulkTestResult } from '../shared/history.js';
+import { FolderSorting } from './sorting.js';
 
 const uuid = z.string().uuid();
 const message = (error: unknown) => error instanceof Error ? error.message : 'Unexpected evaluation failure.';
+function evaluationResults(job: Job): JudgeResult[] {
+  const selection = job.retrySelection;
+  return selection
+    ? job.results.filter(result => selection.some(selected => selected.clipId === result.clipId && selected.judgeId === result.judgeId))
+    : job.results;
+}
 const jobRequest = z.object({
   name: testNameSchema,
   profile: profileSchema,
@@ -61,7 +68,7 @@ export async function createApp(options: {
   for (const job of savedJobs) {
     if (job.status === 'running') {
       job.status = 'interrupted';
-      for (const result of job.results) if (['running', 'pending'].includes(result.status)) {
+      for (const result of evaluationResults(job)) if (['running', 'pending'].includes(result.status)) {
         result.status = 'interrupted'; result.error = 'Server stopped before this assessment completed. Resume to retry.';
       }
       await store.saveJob(job);
@@ -86,8 +93,8 @@ export async function createApp(options: {
   function queueState(): TestQueueState {
     return {
       paused: queuePaused, error: queueError,
-      active: active ? { id: active.job.id, name: evaluationName(active.job) } : undefined,
-      waiting: waiting.map(job => ({ id: job.id, name: evaluationName(job) })),
+      active: active ? { id: active.job.id, name: evaluationName(active.job), retry: active.job.retrySelection ? true : undefined } : undefined,
+      waiting: waiting.map(job => ({ id: job.id, name: evaluationName(job), retry: job.retrySelection ? true : undefined })),
     };
   }
   async function drainQueue() {
@@ -147,6 +154,9 @@ export async function createApp(options: {
     next();
   });
   app.use(express.json({ limit: '9mb' }));
+  const folderSorting = new FolderSorting(options.dataDir);
+  app.post('/api/folders/preview', async (req, res) => res.json(await folderSorting.plan(req.body)));
+  app.post('/api/folders/apply', async (req, res) => res.json(await folderSorting.apply(req.body)));
   app.get('/api/config', async (_req, res) => res.json({
     ...await store.settings(), ...connection.status(), runtimeError, rubric: RUBRIC_VERSION,
   }));
@@ -251,7 +261,16 @@ export async function createApp(options: {
   });
   app.get('/api/clips/:id/audio', async (req, res) => {
     const id = uuid.parse(req.params.id);
-    res.type('wav').send(wav(await store.pcm(id)));
+    const audio = wav(await store.pcm(id));
+    res.type('wav').set('Accept-Ranges', 'bytes');
+    const ranges = req.get('Range')?.startsWith('bytes=') ? req.range(audio.length, { combine: true }) : undefined;
+    if (ranges === -1) { res.status(416).set('Content-Range', `bytes */${audio.length}`).end(); return; }
+    if (ranges && ranges !== -2 && ranges.type === 'bytes' && ranges.length === 1) {
+      const { start, end } = ranges[0];
+      res.status(206).set('Content-Range', `bytes ${start}-${end}/${audio.length}`).send(audio.subarray(start, end + 1));
+      return;
+    }
+    res.send(audio);
   });
   app.get('/api/jobs', async (_req, res) => {
     const jobs = await store.jobs();
@@ -345,7 +364,7 @@ export async function createApp(options: {
     await deleteEvaluation(id);
     res.json({ deleted: id });
   });
-  async function run(job: Job, controller: AbortController, credentials: Credentials, selected = job.results) {
+  async function run(job: Job, controller: AbortController, credentials: Credentials, selected = evaluationResults(job)) {
     try {
       if (job.rubric !== RUBRIC_VERSION) throw new Error('The rubric changed. Create a new evaluation with the current rubric.');
       for (const clip of job.clips) {
@@ -395,6 +414,7 @@ export async function createApp(options: {
       for (const r of selected) if (r.status === 'pending' || r.status === 'running') {
         r.status = 'cancelled'; r.error = 'Evaluation cancelled before completion.';
       }
+      delete job.retrySelection;
       await store.saveJob({ ...job, status });
       job.status = status;
     } catch (error) {
@@ -457,16 +477,15 @@ export async function createApp(options: {
     const index = waiting.findIndex(job => job.id === id);
     if (index >= 0) {
       const [job] = waiting.splice(index, 1);
+      const original = structuredClone(job);
       changingJobs.add(id);
       job.status = 'cancelled';
-      for (const result of job.results) {
+      for (const result of evaluationResults(job)) {
         result.status = 'cancelled'; result.error = 'Cancelled before the queued test started.';
       }
       try { await store.saveJob(job); res.json({ status: 'cancelled' }); }
       catch (error) {
-        job.status = 'queued';
-        for (const result of job.results) { result.status = 'pending'; delete result.error; }
-        waiting.splice(index, 0, job); queuePaused = true;
+        waiting.push(original); waiting.sort((a, b) => a.queueOrder! - b.queueOrder!); queuePaused = true;
         queueError = `Queue paused: cancellation could not be saved. ${connection.redact(error)}`;
         console.error(queueError); throw error;
       } finally { changingJobs.delete(id); }
@@ -475,37 +494,66 @@ export async function createApp(options: {
     if (!active || active.job.id !== id) { res.status(409).json({ error: 'This evaluation is not running.' }); return; }
     active.controller.abort(); res.json({ status: 'cancelling' });
   });
-  app.post('/api/jobs/:id/resume', async (req, res) => {
-    const { retryAudioIssues } = z.object({ consent: z.literal(true), retryAudioIssues: z.boolean().optional() }).parse(req.body);
-    if (active || dispatching || queuedWrites || waiting.length) { res.status(409).json({ error: 'Another evaluation is running or queued. Wait for the queue to finish.' }); return; }
+  app.post(['/api/jobs/:id/resume', '/api/jobs/:id/retry'], async (req, res) => {
+    const enqueue = req.path.endsWith('/retry');
+    const input = z.object({
+      consent: z.literal(true), retryAudioIssues: z.boolean().optional(), retryUnassessed: z.boolean().optional(), singleSpeakerFallback: z.literal(true).optional(), file: z.string().min(1).optional(),
+    }).strict().refine(value => !(value.retryAudioIssues && value.retryUnassessed), 'Choose one retry mode.')
+      .refine(value => !value.file || value.retryUnassessed, 'A file can only be selected when retrying unassessed inputs.').parse(req.body);
+    const { retryAudioIssues, singleSpeakerFallback, file } = input;
+    const retryUnassessed = input.retryUnassessed ?? (enqueue && !retryAudioIssues);
+    if (!enqueue && (active || dispatching || queuedWrites || waiting.length)) { res.status(409).json({ error: 'Another evaluation is running or queued. Wait for the queue to finish.' }); return; }
     const credentials = connection.current();
     const id = uuid.parse(req.params.id);
-    if (changingJobs.has(id)) { res.status(409).json({ error: 'This evaluation is being changed.' }); return; }
+    if (changingJobs.has(id) || active?.job.id === id || waiting.some(job => job.id === id)) {
+      res.status(409).json({ error: 'This test already has a running or queued evaluation/retry. Retry again after it finishes.' }); return;
+    }
     changingJobs.add(id);
+    if (enqueue) queuedWrites++;
     try {
       const job = await store.read<Job>(path.join('jobs', `${id}.json`));
-      if (job.status === 'queued' || active || dispatching || queuedWrites || waiting.length) { res.status(409).json({ error: 'An evaluation is running or queued. Use the queue controls or wait for it to finish.' }); return; }
+      if (job.status === 'queued' || (!enqueue && (active || dispatching || queuedWrites || waiting.length))) { res.status(409).json({ error: 'An evaluation is running or queued. Use the queue controls or wait for it to finish.' }); return; }
       if (job.rubric !== RUBRIC_VERSION) { res.status(409).json({ error: 'The rubric changed. Start a new evaluation instead of mixing rubric versions.' }); return; }
-      const selected = job.results.filter(r => retryAudioIssues ? retryableAudioIssue(r) : r.status !== 'completed');
+      if (file && !job.clips.some(clip => clip.file === file)) {
+        res.status(404).json({ error: 'The selected file does not belong to this evaluation.' }); return;
+      }
+      const selected: JudgeResult[] = retryUnassessed
+        ? unassessedInputs(job).filter(input => !file || input.clip.file === file)
+          .flatMap(input => input.judges.map<JudgeResult>(({ judge, result }) => result ?? { clipId: input.clip.id, judgeId: judge.id, status: 'pending' }))
+        : job.results.filter(r => retryAudioIssues ? retryableAudioIssue(r) : r.status !== 'completed');
       if (!selected.length) {
-        res.status(409).json({ error: retryAudioIssues ? 'No completed assessments report a retryable missing-audio claim.' : 'All judge assessments have already completed.' }); return;
+        res.status(409).json({ error: retryUnassessed ? 'No unassessed inputs remain for this selection.' : retryAudioIssues ? 'No completed assessments report a retryable missing-audio claim.' : 'All judge assessments have already completed.' }); return;
       }
       for (const clip of job.clips.filter(c => selected.some(r => r.clipId === c.id)))
         if (!await store.hasPcm(clip.id)) {
           res.status(409).json({ error: `Saved audio is unavailable for ${clip.file}. Import the original recording again.` }); return;
         }
-      if (active || dispatching || queuedWrites || waiting.length) { res.status(409).json({ error: 'Another evaluation is running or queued. Wait for the queue to finish.' }); return; }
+      if (!enqueue && (active || dispatching || queuedWrites || waiting.length)) { res.status(409).json({ error: 'Another evaluation is running or queued. Wait for the queue to finish.' }); return; }
+      if (singleSpeakerFallback) job.profile = { ...job.profile, singleSpeakerFallback: true };
       for (const r of selected) {
-        const { clipId: _clipId, judgeId: _judgeId, previousEvaluations, ...evaluation } = r;
-        r.previousEvaluations = [...(previousEvaluations ?? []), { ...evaluation, retriedAt: new Date().toISOString() }];
+        if (job.results.includes(r)) {
+          const { clipId: _clipId, judgeId: _judgeId, previousEvaluations, ...evaluation } = r;
+          r.previousEvaluations = [...(previousEvaluations ?? []), { ...evaluation, retriedAt: new Date().toISOString() }];
+        } else job.results.push(r);
         r.status = 'pending'; delete r.error; delete r.assessment; delete r.model; delete r.responseFormat; delete r.audioDiagnostics;
+      }
+      job.retrySelection = selected.map(({ clipId, judgeId }) => ({ clipId, judgeId }));
+      if (enqueue) {
+        job.status = 'queued';
+        await enqueueEvaluation(job);
+        res.status(202).json(job);
+        return;
       }
       job.status = 'running';
       const controller = new AbortController(); active = { job, controller };
       try { await store.saveJob(job); }
       catch (error) { active = undefined; throw error; }
       void run(job, controller, credentials, selected); res.json(job);
-    } finally { changingJobs.delete(id); }
+    } finally {
+      changingJobs.delete(id);
+      if (enqueue) queuedWrites--;
+      void drainQueue();
+    }
   });
   const errors: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
     if (error instanceof SyntaxError && 'body' in error) {

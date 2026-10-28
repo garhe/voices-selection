@@ -4,8 +4,9 @@ import { once } from 'node:events';
 import WebSocket, { WebSocketServer } from 'ws';
 import { automaticRegions } from '../src/audio.js';
 import { evaluationBlockers, inputCount } from '../src/readiness.js';
-import { eligibleScore, normalizeAssessment, summarize, type Assessment, type Clip, type Profile } from '../shared/domain.js';
-import { ASSESSMENT_FUNCTION, assessmentTool, instructions, judgeAudio } from '../server/realtime.js';
+import { eligibleScore, normalizeAssessment, summarize, summarizeVoiceEvidence, unassessedInputs, singleSpeakerFallbackCount, type Assessment, type Clip, type Profile } from '../shared/domain.js';
+import { ASSESSMENT_FUNCTION, assessmentTool, instructions, judgeAudio, parseAssessment } from '../server/realtime.js';
+import { testTableCsv } from '../shared/history.js';
 import { assessment, clip, job, profile } from './fixtures.js';
 
 const automatic: Profile = { ...profile, scope: 'both', speakerMode: 'automatic' };
@@ -102,6 +103,54 @@ test('the listening rubric uses content, forbids first-speaker assumptions and d
   assert.match(prompt, /Do NOT assume first speaker=agent/);
   assert.match(prompt, /not timestamp diarization or source separation/);
   assert.match(prompt, /Do not transcribe/);
+});
+test('single-speaker fallback is explicitly gated, scored and exported without pretending the agent was identified', () => {
+  const enabled: Profile = { ...automatic, singleSpeakerFallback: true };
+  const raw = assessment(4);
+  raw.speakerAttribution = { role: 'agent', status: 'single_speaker_fallback', singleSpeaker: true,
+    evidence: 'The agent was not identified; exactly one unambiguous speaker is audible.' };
+  const accepted = parseAssessment(JSON.stringify(raw), enabled, 'agent');
+  assert.equal(eligibleScore(accepted, enabled), 4);
+  assert.equal(accepted.speakerAttribution!.status, 'single_speaker_fallback');
+  for (const disabled of [automatic, { ...enabled, speakerMode: 'manual' }, { ...enabled, scope: 'single' }] as Profile[])
+    assert.throws(() => normalizeAssessment(raw, disabled, 'agent'), /Single-speaker fallback requires/);
+  for (const change of [
+    (value: Assessment) => { value.speakerAttribution!.singleSpeaker = false; },
+    (value: Assessment) => { delete value.speakerAttribution!.singleSpeaker; },
+    (value: Assessment) => { value.speakerAttribution!.role = 'customer'; },
+    (value: Assessment) => { value.languageSupported = false; },
+    (value: Assessment) => { value.assessable = false; },
+  ]) {
+    const invalid = structuredClone(raw); change(invalid);
+    assert.throws(() => normalizeAssessment(invalid, enabled, 'agent'), /Single-speaker fallback requires/);
+  }
+  const value = job([clip({ role: 'agent' })], [4, 4]);
+  value.profile = enabled;
+  for (const result of value.results) result.assessment = structuredClone(accepted);
+  assert.equal(summarize(value)[0].score, 4);
+  assert.equal(unassessedInputs(value).length, 0);
+  assert.equal(singleSpeakerFallbackCount(value), 2);
+  assert.ok(summarizeVoiceEvidence(value)[0].judges[0].dimensions.some(d => d.reasons.length > 0));
+  const csv = testTableCsv([value]);
+  assert.match(csv, /"Single-speaker fallback assessments"/);
+  assert.ok(csv.trim().endsWith('"2"'));
+  value.results[0].assessment!.scores.naturalness = null;
+  assert.equal(summarize(value)[0].score, null, 'A fallback does not invent a missing active rating.');
+  assert.equal(unassessedInputs(value).length, 1);
+});
+test('fallback instructions and function schema require exactly one speaker and preserve legacy role-only evaluation', () => {
+  const enabled: Profile = { ...automatic, singleSpeakerFallback: true };
+  const tool = assessmentTool(enabled, 'agent').parameters.properties.speakerAttribution!;
+  assert.ok(tool.properties.status.enum.includes('single_speaker_fallback'));
+  assert.ok(tool.required.includes('singleSpeaker'));
+  assert.match(instructions(enabled, 'agent'), /exactly ONE unambiguous speaker/);
+  assert.match(instructions(enabled, 'agent'), /Never use fallback for multiple speakers/);
+  for (const [configuration, role] of [[automatic, 'agent'], [enabled, 'customer']] as const) {
+    assert.equal(assessmentTool(configuration, role).parameters.properties.speakerAttribution!.properties.status.enum.includes('single_speaker_fallback'), false);
+    assert.doesNotMatch(instructions(configuration, role), /SINGLE-SPEAKER FALLBACK/);
+  }
+  const uncertain = attributed('agent', 'uncertain');
+  assert.equal(eligibleScore(uncertain, enabled), null, 'Multiple or uncertain speakers remain unassessable.');
 });
 test('Realtime receives the requested role and validates its attribution for the full conversation input', async () => {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, voiceGenders, type Job, type VoiceGender } from './domain.js';
+import { evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, testType, unassessedInputs, singleSpeakerFallbackCount, voiceGenders, type Job, type VoiceGender } from './domain.js';
 import { csvCell } from './csv.js';
 
 export const testMetadataSchema = z.object({
@@ -15,7 +15,11 @@ export type TestHistory = {
   id: string; name: string; createdAt: string; status: Job['status']; stage: Job['profile']['stage'];
   clips: number; voices: string[]; languages: string[]; genders: VoiceGender[];
   bestScore: number | null; bestVoices: { voice: string; role: string }[];
+  incomplete?: boolean;
 };
+export function testStatusLabel(test: Pick<TestHistory, 'status' | 'incomplete'>): string {
+  return test.status === 'completed' && test.incomplete ? 'Completed*' : test.status[0].toUpperCase() + test.status.slice(1);
+}
 export type BulkTestAction = 'delete' | 'redo';
 export type BulkTestResult = {
   succeeded: { id: string; newId?: string }[];
@@ -23,6 +27,9 @@ export type BulkTestResult = {
 };
 export function canManageTest(test: Pick<TestHistory, 'status'>): boolean {
   return test.status !== 'running' && test.status !== 'queued';
+}
+export function canRetryUnassessedTest(test: Pick<TestHistory, 'status' | 'incomplete'>): boolean {
+  return test.status === 'completed' && test.incomplete === true;
 }
 
 const languageNames = new Intl.DisplayNames(['en'], { type: 'language', fallback: 'none' });
@@ -47,6 +54,7 @@ export function testHistory(job: Job): TestHistory {
   const voices = [...new Set(job.clips.map(clip => clip.voice))].sort();
   return {
     id: job.id, name: evaluationName(job), createdAt: job.createdAt, status: job.status,
+    incomplete: job.status === 'completed' && unassessedInputs(job).length > 0,
     stage: job.profile.stage, clips: job.clips.length, voices, ...testNameMetadata(evaluationName(job)),
     bestScore,
     bestVoices: scored.filter(value => bestScore !== null && Math.abs(value.score! - bestScore) < 1e-9)
@@ -82,15 +90,16 @@ export function testTableCsv(jobs: Job[]): string {
     ...Array.from({ length: bestCount }, (_, index) => ({ kind: 'best' as const, index, label: bestCount === 1 ? 'Best voice' : `Best voice ${index + 1}` })),
     ...Array.from({ length: otherCount }, (_, index) => ({ kind: 'other' as const, index, label: `Other voice ${index + 1}` })),
   ];
+  const includeFallback = jobs.some(job => singleSpeakerFallbackCount(job) > 0);
   const rows = [
-    ['Test name', 'Test time', 'Locale', 'Gender', ...groups.flatMap(({ label }) => [
+    ['Test name', 'Test time', 'Test type', 'Locale', 'Gender', ...groups.flatMap(({ label }) => [
       `${label} name`, `${label} overall score`,
       ...[...judgeColumns.values()].map(judge => `${label} - ${judge} average score`),
-    ])],
+    ]), ...(includeFallback ? ['Single-speaker fallback assessments'] : [])],
     ...reports.map(report => {
       const metadata = testNameMetadata(evaluationName(report.job));
       return [
-        evaluationName(report.job), report.job.createdAt, metadata.languages.join(', ') || 'Not specified', metadata.genders.join(', ') || 'Unspecified',
+        evaluationName(report.job), report.job.createdAt, testType(report.job.profile.stage), metadata.languages.join(', ') || 'Not specified', metadata.genders.join(', ') || 'Unspecified',
         ...groups.flatMap(({ kind, index }) => {
           const voice = report[kind][index];
           if (!voice) return ['', kind === 'best' && index === 0 && !report.best.length ? 'Not assessed' : '', ...[...judgeColumns].map(() => '')];
@@ -101,7 +110,7 @@ export function testTableCsv(jobs: Job[]): string {
               if (!judgeId) return '';
               const score = voice.judges.find(judge => judge.judgeId === judgeId)?.score;
               return score == null ? 'Not assessed' : score.toFixed(2);
-            }),
+            }), ...(includeFallback ? [singleSpeakerFallbackCount(report.job)] : []),
           ];
         }),
       ];
@@ -110,11 +119,13 @@ export function testTableCsv(jobs: Job[]): string {
   return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
 }
 export type TestSort = 'newest' | 'oldest' | 'name-asc' | 'name-desc' | 'score-desc' | 'score-asc';
+export const TEST_STATUS_FILTERS = ['completed', 'incomplete', 'running', 'queued', 'cancelled', 'interrupted'] as const;
 export type TestFilters = {
   search: string; language: string; gender: string; dateFrom: string; dateTo: string; sort: TestSort;
+  status: '' | typeof TEST_STATUS_FILTERS[number];
 };
 export const defaultTestFilters: TestFilters = {
-  search: '', language: '', gender: '', dateFrom: '', dateTo: '', sort: 'newest',
+  search: '', language: '', gender: '', dateFrom: '', dateTo: '', sort: 'newest', status: '',
 };
 function localDay(timestamp: string) {
   const date = new Date(timestamp);
@@ -128,6 +139,9 @@ export function queryTests(entries: TestHistory[], filters: TestFilters, request
     return (!search || [entry.name, entry.id, ...entry.voices, ...entry.languages].join('\n').toLocaleLowerCase().includes(search)) &&
       (!filters.language || entry.languages.some(language => language.toLowerCase() === filters.language.toLowerCase())) &&
       (!filters.gender || entry.genders.some(gender => gender === filters.gender)) &&
+      (!filters.status || (filters.status === 'incomplete'
+        ? entry.status === 'completed' && entry.incomplete === true
+        : entry.status === filters.status && (filters.status !== 'completed' || !entry.incomplete))) &&
       (!filters.dateFrom || day >= filters.dateFrom) && (!filters.dateTo || day <= filters.dateTo);
   }).sort((a, b) => {
     let order = 0;

@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { evaluationName, voiceGenders, type Job, type VoiceLabel } from '../shared/domain';
-import { canManageTest, defaultTestFilters, queryTests, testNameMetadata, TEST_PAGE_SIZES, type BulkTestAction, type TestFilters, type TestHistory } from '../shared/history';
+import { evaluationName, testType, voiceGenders, type Job, type VoiceLabel } from '../shared/domain';
+import { canManageTest, canRetryUnassessedTest, defaultTestFilters, queryTests, testNameMetadata, testStatusLabel, TEST_PAGE_SIZES, TEST_STATUS_FILTERS, type BulkTestAction, type TestFilters, type TestHistory } from '../shared/history';
 import { TestActions, type ReportKind } from './TestActions';
 import { DatePicker } from './DatePicker';
 
 export type { ReportKind } from './TestActions';
-export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selectedIds, onSelectionChange, onExportSelected, onBulkAction, onOpen, onEdit, onDelete, onDownload, onRegenerate, onRefresh }: {
+export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selectedIds, onSelectionChange, onExportSelected, onBulkAction, onRetryUnassessed, onOpen, onEdit, onDelete, onDownload, onRegenerate, onRefresh }: {
   entries: TestHistory[]; busy: boolean;
   pageSize: number; onPageSizeChange: (size: number) => void;
   selectedIds: string[]; onSelectionChange: (ids: string[]) => void;
   onExportSelected: (entries: TestHistory[]) => void;
   onBulkAction: (action: BulkTestAction, entries: TestHistory[]) => void;
+  onRetryUnassessed: (entries: TestHistory[]) => void;
   onOpen: (entry: TestHistory) => void; onEdit: (entry: TestHistory) => void;
   onDelete: (entry: TestHistory) => void; onDownload: (entry: TestHistory, kind: ReportKind) => void;
   onRegenerate: (entry: TestHistory) => void; onRefresh: () => void;
@@ -21,6 +22,7 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
   const results = queryTests(entries, filters, page, pageSize);
   const selectionControl = useRef<HTMLInputElement>(null);
   const selected = entries.filter(entry => selectedIds.includes(entry.id) && canManageTest(entry));
+  const retryableSelected = selected.filter(canRetryUnassessedTest);
   const selectedSet = new Set(selected.map(entry => entry.id));
   const eligibleOnPage = results.entries.filter(canManageTest);
   const checkedOnPage = eligibleOnPage.filter(entry => selectedSet.has(entry.id)).length;
@@ -45,6 +47,10 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
     <section className="card test-library" aria-label="Saved tests">
       <div className="test-filters">
         <label className="test-search">Search tests<input type="search" placeholder="Test name, voice, language or ID" value={filters.search} onChange={event => update('search', event.target.value)} /></label>
+        <label>Test Status<select value={filters.status} onChange={event => update('status', event.target.value as TestFilters['status'])}>
+          <option value="">All statuses</option>{TEST_STATUS_FILTERS.map(status =>
+            <option key={status} value={status}>{status === 'incomplete' ? 'Completed*' : testStatusLabel({ status })}</option>)}
+        </select></label>
         <label>Language<select value={filters.language} onChange={event => update('language', event.target.value)}>
           <option value="">All languages</option>{languages.map(language => <option key={language}>{language}</option>)}
         </select></label>
@@ -66,9 +72,12 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
           <button className="text-button" disabled={busy} onClick={() => onExportSelected(selected)}>Export selected report</button>
           <button className="text-button danger" disabled={busy} onClick={() => onBulkAction('delete', selected)}>Delete selected</button>
           <button className="text-button" disabled={busy} onClick={() => onBulkAction('redo', selected)}>Redo selected</button>
+          {!!retryableSelected.length && <button className="text-button" disabled={busy}
+            title="Queue retries only for unassessed inputs/judges in the selected Completed* tests, including other pages and filters. Successful results are preserved. Additional Azure usage applies."
+            onClick={() => onRetryUnassessed(retryableSelected)}>Retry all unassessable ({retryableSelected.length})</button>}
           <button className="text-button" disabled={busy} onClick={() => onSelectionChange([])}>Clear selection</button>
         </div>}
-        <button className="text-button" disabled={!filters.search && !filters.language && !filters.gender && !filters.dateFrom && !filters.dateTo && filters.sort === 'newest'} onClick={() => { setFilters({ ...defaultTestFilters }); setDateReset(previous => previous + 1); setPage(1); }}>Clear filters</button>
+        <button className="text-button" disabled={!filters.search && !filters.status && !filters.language && !filters.gender && !filters.dateFrom && !filters.dateTo && filters.sort === 'newest'} onClick={() => { setFilters({ ...defaultTestFilters }); setDateReset(previous => previous + 1); setPage(1); }}>Clear filters</button>
       </div>
       <div className="table-scroll test-table-scroll" tabIndex={0} aria-label="Saved test list">
         <table className="test-table">
@@ -76,16 +85,17 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
           <thead><tr><th scope="col" className="test-select"><input ref={selectionControl} type="checkbox" aria-label="Select all eligible tests on this page"
             disabled={busy || !eligibleOnPage.length} checked={eligibleOnPage.length > 0 && checkedOnPage === eligibleOnPage.length}
             onChange={event => select(eligibleOnPage.map(entry => entry.id), event.target.checked)} /></th>
-            <th scope="col">Test name</th><th scope="col">Test time</th><th scope="col">Best voice</th><th scope="col">Best score</th><th scope="col">Language</th><th scope="col">Gender</th><th scope="col">Actions</th></tr></thead>
+            <th scope="col">Test name</th><th scope="col">Test time</th><th scope="col">Test type</th><th scope="col">Best voice</th><th scope="col">Best score</th><th scope="col">Language</th><th scope="col">Gender</th><th scope="col">Actions</th></tr></thead>
           <tbody>{results.entries.map(entry => <tr key={entry.id}>
             <td className="test-select"><input type="checkbox" aria-label={`Select test ${entry.name}`} checked={selectedSet.has(entry.id)}
               disabled={busy || !canManageTest(entry)} title={canManageTest(entry) ? 'Select for report export or bulk actions' : 'Running and queued tests cannot be deleted or redone'}
               onChange={event => select([entry.id], event.target.checked)} /></td>
             <td data-label="Test name"><button className="test-name" title={entry.name} disabled={busy} onClick={() => onOpen(entry)}>{entry.name}</button>
               <div className="test-row-meta"><span title={entry.stage === 'audition' ? 'Voice Selection' : 'TTS evaluation'}>{entry.clips} excerpts</span>
-                <span className={`status-badge ${entry.status}`}>{entry.status}</span></div></td>
+                <span className={`status-badge ${entry.status}`} data-incomplete={entry.incomplete === true} title={entry.incomplete ? 'Not all files have complete, assessable results. Open the report for details and retry options.' : undefined}>{testStatusLabel(entry)}</span></div></td>
             <td data-label="Test time"><time dateTime={entry.createdAt} title={new Date(entry.createdAt).toLocaleString()}>{new Date(entry.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
               <small>{new Date(entry.createdAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</small></time></td>
+            <td data-label="Test type">{testType(entry.stage)}</td>
             <td data-label="Best voice">{entry.bestScore === null ? <span>Not assessed</span> : <>
               {entry.bestVoices.slice(0, 1).map(voice => <div className="test-best-voice" key={JSON.stringify(voice)}><strong title={voice.voice}>{voice.voice}</strong><small>{voice.role}</small></div>)}
               {entry.bestVoices.length > 1 && <button className="test-ties" title={entry.bestVoices.map(voice => `${voice.voice} / ${voice.role}`).join(', ')} disabled={busy} onClick={() => onOpen(entry)}>+{entry.bestVoices.length - 1} tied</button>}
@@ -99,7 +109,7 @@ export function TestLibrary({ entries, busy, pageSize, onPageSizeChange, selecte
             <td data-label="Actions"><TestActions entry={entry} busy={busy} onEdit={onEdit} onDelete={onDelete}
               onRegenerate={onRegenerate} onDownload={onDownload} /></td>
           </tr>)}
-            {!results.entries.length && <tr><td colSpan={8}><h3>{entries.length ? 'No matching tests' : 'No saved tests yet'}</h3>
+            {!results.entries.length && <tr><td colSpan={9}><h3>{entries.length ? 'No matching tests' : 'No saved tests yet'}</h3>
               <p>{entries.length ? 'Change or clear the filters to see more tests.' : 'Create an evaluation in Evaluation setup. Its results will appear here.'}</p></td></tr>}
           </tbody>
         </table>

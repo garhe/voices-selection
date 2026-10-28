@@ -1,0 +1,30 @@
+import { DEFAULT_RUBRIC, rubricContentSchema, type Dimension, type Rubric } from './domain';
+
+const anchors: Record<Dimension, string> = {
+  naturalness: '1: pervasive forced, mechanical or disjoint delivery makes listening very difficult. 2: frequent forced phrase shapes or unnatural transitions noticeably distract. 3: intermittent rehearsed cadence or awkward transitions are audible, but most speech remains comfortable. 4: generally believable and easy-flowing, with only isolated minor stiffness. 5: consistently unforced phrase connections, timing and voice texture with no salient unnatural delivery.',
+  articulation: '1: most target speech cannot be understood because of vocal articulation. 2: frequent blurred word boundaries or unclear sounds require repeated effort. 3: intermittent unclear sounds or boundaries cause noticeable effort. 4: words are comfortably intelligible with only isolated minor articulation issues. 5: consistently clear, effortless intelligibility without over-enunciation. Evaluate sounds, not script complexity or conformity to a preferred accent.',
+  pace: '1: pervasive rushing, dragging or disruptive pauses make phrasing very difficult to follow. 2: frequent timing disruptions noticeably impede listening. 3: intermittent rushed, dragging or awkwardly paused phrases cause effort. 4: generally comfortable timing and phrase grouping with isolated minor disruptions. 5: consistently comfortable rhythm, breath flow and meaningful phrase boundaries. A faster or slower rate is not inherently better.',
+  expressiveness: '1: pervasive inappropriate or uncontrolled vocal modulation strongly disrupts listening. 2: frequent monotony or excessive modulation audibly reduces engagement or comfort. 3: intermittent poorly shaped emphasis or intonation reduces engagement. 4: controlled, suitable intonation and emotional color sustain engagement, with only isolated minor lapses. 5: consistently well-shaped, suitable phrasing and emotional color sustain effortless engagement. Restrained, calm delivery can earn 5; do not deduct merely because more emotion or pitch range is imaginable.',
+  contextFit: '1: audible delivery persistently conflicts with the supplied vocal style. 2: frequent, clear vocal-style mismatches. 3: intermittent, identifiable mismatches while much of the delivery fits. 4: generally fits the requested tone and persona, with isolated minor mismatches. 5: consistently fits the requested vocal style without a salient mismatch. Judge the actual supplied style, not an invented ideal; never score service actions, politeness of wording or task success.',
+  accentFit: '1: pervasive, salient pronunciation/stress/intonation patterns conflict with the explicitly supplied market/accent target. 2: frequent clear departures from that target. 3: intermittent clear departures, with substantial target-compatible speech. 4: broadly target-compatible patterns, with isolated minor departures. 5: consistently target-compatible pronunciation, stress and intonation within acceptable regional variation. Do not infer identity or native-speaker status. Without a usable target or sufficient evidence, use null rather than a middle score.',
+  audioQuality: '1: severe persistent distortion, dropouts or noise obscure most speech. 2: frequent intrusive recording defects obscure some speech. 3: noticeable intermittent defects reduce fidelity, while speech is mostly accessible. 4: clean and usable with isolated minor audible defects. 5: consistently clean, intact audio with no salient audible defects. Do not invent defects or infer technical measurements; in human auditions do not transfer recording defects into vocal-performance dimensions.',
+};
+
+export function anchoredRubricContent(source: Rubric = DEFAULT_RUBRIC) {
+  return rubricContentSchema.parse({
+    name: 'Experimental anchored voice-persona v1',
+    instructions: `${source.instructions}
+SCORING CALIBRATION EXPERIMENT v1:
+Use the dimension-specific anchors below, not a general impression of whether you like the voice. Assess each dimension independently over all audible speech belonging to the requested role.
+Match the observed severity and recurrence to an anchor. Use a fractional score only when the evidence lies between adjacent anchors; do not manufacture fine distinctions. Do not start at 5 and subtract imagined faults, or default to a middle score when evidence is insufficient.
+For each active dimension, give one concise recording-specific audible observation, say whether it is isolated, intermittent or frequent when supported, and explain its relation to the chosen anchor. An absence of salient defects can support a high score without inventing a flaw. Do not invent counts, timestamps, measurements or quotes.
+Do not lower a score for a hypothetical improvement. In particular, calm or restrained delivery is not itself flat, scripted or disengaged. A deduction needs an identifiable audible pattern and its effect on listening, not a generic adjective.
+Keep dimensions separate: unclear phonemes concern articulation; disruptive timing concerns pace; unsuitable emotional contour concerns expressiveness; unnatural phrase connections concern naturalness; mismatch to the supplied vocal style concerns target-style fit. Apply more than one deduction only when distinct effects support each; name those effects. Market mismatch belongs only in accent fit, not intelligibility or naturalness merely because the accent differs.
+Do not try to reproduce an earlier result, infer a candidate ranking, reward a model/vendor, or force candidates to receive different scores. Equal scores are valid. Retain null and a specific limitation when evidence is genuinely insufficient. Preserve all audio-only, language, role-attribution and uncertainty safeguards.`,
+    testGuides: structuredClone(source.testGuides),
+    dimensions: source.dimensions.map(dimension => ({
+      ...dimension, weights: { ...dimension.weights },
+      description: `${dimension.description}\nScore anchors: ${anchors[dimension.id]}`,
+    })),
+  });
+}

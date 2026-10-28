@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +28,172 @@ function gate() {
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
 }
+
+test('targeted retries join the FIFO queue, preserve other judgments, and allow one pending retry per test', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-queued-retry-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const firstGate = gate(), retryGate = gate();
+  const calls: string[] = [];
+  const activeTargets = new Map<string, number>();
+  let maximumTests = 0;
+  const backend = await createApp({
+    dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    evaluate: async input => {
+      const target = input.profile.target;
+      calls.push(target);
+      activeTargets.set(target, (activeTargets.get(target) ?? 0) + 1);
+      maximumTests = Math.max(maximumTests, activeTargets.size);
+      try {
+        if (target === 'Active') await firstGate.promise;
+        if (target === 'Retry A') await retryGate.promise;
+        const result = assessment(); result.scores.contextFit = 4;
+        return { assessment: result, responseFormat: 'function_call' };
+      } finally {
+        const count = activeTargets.get(target)! - 1;
+        if (count) activeTargets.set(target, count); else activeTargets.delete(target);
+      }
+    },
+  });
+  backend.app.use(backend.errors); server.on('request', backend.app);
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: unknown) => fetch(url + route, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const readJob = async (id: string) => await (await fetch(`${url}/api/jobs/${id}`)).json() as Job;
+  const state = async () => await (await fetch(url + '/api/queue')).json() as TestQueueState;
+  const clips = [clip({ file: 'retry/first.wav' }), clip({ file: 'retry/other.wav' })];
+  for (const saved of clips) await backend.store.saveClip(saved, Buffer.alloc(48000));
+  const source = (name: string) => {
+    const value = fixtureJob(clips, [4, 4]);
+    value.rubric = RUBRIC_VERSION; value.name = name; value.profile = { ...profile, target: name };
+    for (const result of value.results) result.assessment!.scores.contextFit = 4;
+    value.results[0].assessment!.assessable = false;
+    return value;
+  };
+  const a = source('Retry A'), b = source('Retry B');
+  a.results[2].status = 'failed'; a.results[2].error = 'Unselected service failure.'; delete a.results[2].assessment;
+  b.results[2].assessment!.scores.naturalness = null;
+  await backend.store.saveJob(a); await backend.store.saveJob(b);
+  const addNormal = async (name: string) => {
+    const response = await post('/api/jobs', {
+      name, profile: { ...profile, target: name }, clipIds: [clips[0].id],
+      judges: [a.judges[0]], consent: true, enqueue: true,
+    });
+    assert.equal(response.status, 201);
+    return await response.json() as Job;
+  };
+  try {
+    await backend.store.remove(path.join('clips', `${clips[0].id}.pcm`));
+    const missing = await post(`/api/jobs/${a.id}/retry`, { consent: true, retryUnassessed: true, file: clips[0].file });
+    assert.equal(missing.status, 409);
+    assert.match((await missing.json()).error, /Saved audio is unavailable/);
+    assert.deepEqual(await readJob(a.id), a);
+    await backend.store.saveClip(clips[0], Buffer.alloc(48000));
+    const first = await addNormal('Active');
+    await until(state, value => value.active?.id === first.id);
+    const responses = await Promise.all([0, 1].map(() => post(`/api/jobs/${a.id}/retry`, {
+      consent: true, retryUnassessed: true, singleSpeakerFallback: true, file: clips[0].file,
+    })));
+    assert.deepEqual(responses.map(response => response.status).sort(), [202, 409]);
+    const normal = await addNormal('Normal');
+    assert.equal((await post(`/api/jobs/${b.id}/retry`, { consent: true })).status, 202,
+      'Completed but unassessable/partial judgments are retryable, even with no failed task status.');
+    const waiting = (await state()).waiting;
+    assert.deepEqual(waiting.map(value => value.id), [a.id, normal.id, b.id]);
+    assert.equal(waiting[0].retry, true); assert.equal(waiting[2].retry, true);
+    const queued = await readJob(a.id);
+    assert.equal(queued.status, 'queued');
+    assert.equal(queued.profile.singleSpeakerFallback, true);
+    assert.deepEqual(queued.retrySelection, [{ clipId: clips[0].id, judgeId: a.judges[0].id }]);
+    assert.deepEqual(queued.results[0].previousEvaluations![0].assessment, a.results[0].assessment);
+    for (const index of [1, 2, 3]) assert.deepEqual(queued.results[index], a.results[index]);
+    firstGate.release();
+    await until(state, value => value.active?.id === a.id);
+    assert.equal((await post(`/api/jobs/${a.id}/retry`, { consent: true })).status, 409);
+    assert.deepEqual(calls, ['Active', 'Retry A']);
+    retryGate.release();
+    await until(state, value => !value.active && !value.waiting.length);
+    assert.deepEqual(calls, ['Active', 'Retry A', 'Normal', 'Retry B', 'Retry B']);
+    assert.equal(maximumTests, 1);
+    const done = await readJob(a.id);
+    for (const index of [1, 2, 3]) assert.deepEqual(done.results[index], a.results[index]);
+    assert.equal(done.retrySelection, undefined);
+    assert.equal((await post(`/api/jobs/${a.id}/retry`, { consent: true })).status, 202);
+    await until(state, value => !value.active && !value.waiting.length);
+    assert.deepEqual(calls.slice(-1), ['Retry A']);
+    const final = await readJob(a.id);
+    assert.equal(final.results[2].status, 'completed');
+    assert.equal(final.results[2].previousEvaluations![0].error, a.results[2].error);
+    assert.equal((await post(`/api/jobs/${a.id}/retry`, { consent: true })).status, 409,
+      'A fully assessable test has no work to retry.');
+  } finally {
+    firstGate.release(); retryGate.release(); backend.cancelActive();
+    server.close(); await once(server, 'close');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('queued retry selections survive cancellation failures and restart without changing unselected results', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-retry-restart-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  let calls = 0;
+  const options = {
+    dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    evaluate: async () => { calls++; return { assessment: assessment(), responseFormat: 'function_call' as const }; },
+  };
+  let backend = await createApp(options);
+  backend.app.use(backend.errors);
+  server.on('request', (req, res) => backend.app(req, res));
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: unknown) => fetch(url + route, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const state = async () => await (await fetch(url + '/api/queue')).json() as TestQueueState;
+  const readJob = async () => await backend.store.read<Job>(path.join('jobs', `${original.id}.json`));
+  const clips = [clip({ file: 'selected.wav' }), clip({ file: 'untouched.wav' })];
+  const original = fixtureJob(clips, [4, 4]); original.rubric = RUBRIC_VERSION;
+  original.results[0].assessment!.assessable = false;
+  original.results[2].status = 'failed'; original.results[2].error = 'Unselected failure.'; delete original.results[2].assessment;
+  for (const saved of clips) await backend.store.saveClip(saved, Buffer.alloc(48000));
+  await backend.store.saveJob(original);
+  const retry = () => post(`/api/jobs/${original.id}/retry`, { consent: true, retryUnassessed: true, file: clips[0].file });
+  try {
+    await post('/api/queue/pause', {});
+    assert.equal((await retry()).status, 202);
+    const queued = await readJob();
+    const save = backend.store.saveJob.bind(backend.store);
+    let fail = true;
+    backend.store.saveJob = async value => {
+      if (value.status === 'cancelled' && fail) { fail = false; throw new Error('Synthetic retry cancellation persistence failure'); }
+      return save(value);
+    };
+    assert.equal((await post(`/api/jobs/${original.id}/cancel`, {})).status, 400);
+    assert.deepEqual(await readJob(), queued);
+    assert.equal((await state()).waiting.length, 1);
+    assert.equal((await post(`/api/jobs/${original.id}/cancel`, {})).status, 200);
+    const cancelled = await readJob();
+    assert.equal(cancelled.results[0].status, 'cancelled');
+    for (const index of [1, 2, 3]) assert.deepEqual(cancelled.results[index], original.results[index]);
+    assert.equal((await retry()).status, 202);
+    backend.cancelActive();
+    backend = await createApp(options); backend.app.use(backend.errors);
+    const restarted = await state();
+    assert.equal(restarted.paused, true);
+    assert.equal(restarted.waiting[0].retry, true);
+    assert.equal(calls, 0);
+    await post('/api/queue/start', { consent: true });
+    await until(state, value => !value.active && !value.waiting.length);
+    const done = await readJob();
+    assert.equal(calls, 1, 'Only the persisted selected judgment runs after restart.');
+    for (const index of [1, 2, 3]) assert.deepEqual(done.results[index], original.results[index]);
+    assert.equal(done.results[0].previousEvaluations!.length, 2);
+  } finally {
+    backend.cancelActive(); server.close(); await once(server, 'close');
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('queued tests run FIFO with saved inputs, continue after failures, and support pause and cancellation', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-queue-'));
@@ -155,7 +322,12 @@ test('queue panel stays compact and exposes ordered waiting tests, cancellation 
   const html = render({ paused: false, active: { id: 'active', name: 'Current' }, waiting: [{ id: 'next', name: 'Next' }] });
   assert.match(html, /Running: Current/); assert.match(html, /Pause queue/);
   assert.match(html, /Cancel queued test Next/); assert.match(html, /<details>/);
+  assert.match(html, /<ol><li><div class="test-queue-row"><span title="Next">Next<\/span>/);
   assert.match(render({ paused: true, waiting: [{ id: 'next', name: 'Next' }], error: 'Connection unavailable' }), /Start queue/);
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.test-queue-row\{display:grid;grid-template-columns:minmax\(0,1fr\) auto;align-items:center;gap:12px\}/);
+  assert.match(css, /\.test-queue-row>span\{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis\}/);
+  assert.match(css, /\.test-queue-row>button\{justify-self:end\}/);
 });
 
 test('concurrent queue admissions persist before execution and a dispatch save failure pauses without losing tests', async () => {

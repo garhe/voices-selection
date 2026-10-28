@@ -43,6 +43,8 @@ export function themePalette(color: string): Record<string, string> {
     '--theme-accent-hover': `rgb(${rgb(mix(accent, 0, .32))})`,
     '--theme-row-hover': `rgb(${rgb(mix(accent, 255, .68))})`,
     '--theme-heading': `rgb(${rgb(mix(accent, 0, .45))})`,
+    '--theme-text': `rgb(${rgb(mix(accent, 0, .5))})`,
+    '--theme-muted': `rgb(${rgb(mix(accent, 0, .42))})`,
     '--theme-page': `rgb(${rgb(mix(base, 255, .89))})`,
     '--theme-glow': `rgb(${rgb(mix(base, 255, .58))})`,
     '--theme-glow-soft': `rgb(${rgb(mix(base, 255, .77))})`,

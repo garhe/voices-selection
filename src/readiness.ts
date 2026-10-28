@@ -1,8 +1,12 @@
-import { clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, testNameSchema, rolesForScope, profileRubric, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Profile, type Settings, type Rubric } from '../shared/domain';
+import { clipSchema, clipScopeError, settingsSchema, profileSchema, testNameSchema, rolesForScope, profileRubric, mediaText, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Judge, type Profile, type Settings, type Rubric } from '../shared/domain';
 import type { Recording } from './audio';
 import { testNameMetadata } from '../shared/history';
 
 export { DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE };
+
+export function sortJudges(judges: readonly Judge[]): Judge[] {
+  return [...judges].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+}
 
 export function rubricHasChanges(rubric: Rubric, stored?: Rubric): boolean {
   return !stored || rubric.id !== stored.id || rubric.revision !== stored.revision ||
@@ -22,7 +26,7 @@ export function rubricHasChanges(rubric: Rubric, stored?: Rubric): boolean {
 export function newTestProfile(previous: Profile = {
   stage: 'audition', scope: 'agent', speakerMode: 'automatic', target: '', language: 'auto', targetMarket: '',
 }): Profile {
-  const next = { ...previous, rubric: structuredClone(DEFAULT_RUBRIC) };
+  const next = { ...previous, singleSpeakerFallback: true, rubric: structuredClone(DEFAULT_RUBRIC) };
   return withTestNameLanguage({ ...next, target: defaultTestGuide(next) }, '');
 }
 
@@ -55,8 +59,12 @@ export function withLanguageAccent(profile: Profile, value = profile.targetMarke
   return { ...profile, language: value, targetMarket: value.trim().toLowerCase() === 'auto' ? '' : value };
 }
 export function applyLanguageHint<T extends { language: string }>(inputs: T[], language: string): T[] {
-  const hint = languageHintSchema.parse(language);
+  // Draft edits may be incomplete while typing; readiness validates before submission.
+  const hint = language.trim();
   return inputs.map(input => ({ ...input, language: hint }));
+}
+export function displayLanguageHint(language: string): string {
+  return language.trim().toLowerCase() === 'auto' ? 'Auto' : language;
 }
 export function inputCount(recordings: Reviewable[], scope: Profile['scope'], speakerMode: Profile['speakerMode']): number {
   return recordings.reduce((total, recording) => total + (speakerMode === 'automatic'
@@ -104,5 +112,5 @@ export function evaluationBlockers(input: {
     blockers.push('Reduce the selection to at most 200 role/audio inputs per evaluation.');
   if (input.busy) blockers.push('Wait for the current operation to finish.');
   if (input.running) blockers.push('Wait for the running evaluation to finish, or cancel it from Results.');
-  return blockers;
+  return blockers.map(text => mediaText(text, input.profile.stage));
 }

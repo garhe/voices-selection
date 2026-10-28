@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { applyLanguageHint, evaluationBlockers, newTestProfile, rubricHasChanges, recordingReviewed, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
-import { activeDimensions, eligibleScore, profileSchema, rubricSchema, DEFAULT_RUBRIC, BOTH_SPEAKERS_TEST_GUIDE, type Rubric } from '../shared/domain.js';
+import { applyLanguageHint, displayLanguageHint, evaluationBlockers, newTestProfile, rubricHasChanges, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
+import { activeDimensions, eligibleScore, profileSchema, rubricSchema, mediaText, DEFAULT_RUBRIC, BOTH_SPEAKERS_TEST_GUIDE, type Rubric } from '../shared/domain.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { RubricEditor } from '../src/RubricEditor.js';
@@ -11,8 +11,24 @@ import { assessment, clip, profile as baseProfile } from './fixtures.js';
 
 const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
 
+test('default judge order is natural by name and preserves IDs, deployments and source order', () => {
+  const judges = [2, 10, 3, 1].map(number => ({ id: randomUUID(), name: `Judge ${number}`, deployment: `deployment-${number}` }));
+  const snapshot = structuredClone(judges);
+  const sorted = sortJudges(judges);
+  assert.deepEqual(sorted.map(judge => judge.name), ['Judge 1', 'Judge 2', 'Judge 3', 'Judge 10']);
+  assert.deepEqual(judges, snapshot);
+  for (const judge of sorted) assert.equal(judge, judges.find(source => source.id === judge.id));
+  assert.deepEqual(sortJudges([]), []);
+  const duplicates = [
+    { id: randomUUID(), name: 'custom reviewer', deployment: 'first' },
+    { id: randomUUID(), name: 'Custom Reviewer', deployment: 'second' },
+  ];
+  assert.deepEqual(sortJudges(duplicates), duplicates, 'Equal names retain their original order.');
+});
+
 test('fresh tests load an independent saved default rubric, including after a custom test', () => {
   const initial = newTestProfile();
+  assert.equal(initial.singleSpeakerFallback, true);
   assert.deepEqual(initial.rubric, DEFAULT_RUBRIC);
   assert.equal(initial.target, DEFAULT_TEST_GUIDE);
   assert.equal(rubricHasChanges(initial.rubric!, DEFAULT_RUBRIC), false);
@@ -35,6 +51,23 @@ test('fresh tests load an independent saved default rubric, including after a cu
     assert.notEqual(DEFAULT_RUBRIC.dimensions[0].label, 'Draft-only label');
     assert.notEqual(DEFAULT_RUBRIC.testGuides.single, 'Draft-only guide');
   }
+});
+test('TTS terminology uses audio while Voice Selection keeps recording labels', () => {
+  for (const [source, expected] of [
+    ['Recording-set comparison', 'Audio-set comparison'],
+    ['Recording quality', 'Audio quality'],
+    ['Bring your recordings', 'Bring your audio files'],
+    ['2 recordings scored', '2 audio files scored'],
+  ]) {
+    assert.equal(mediaText(source, 'tts'), expected);
+    assert.equal(mediaText(source, 'audition'), source);
+  }
+  const blockers = evaluationBlockers({
+    name: 'TTS example', profile: { ...profile, stage: 'tts' }, scope: 'single', speakerMode: 'manual',
+    recordings: [], busy: false, running: false,
+  });
+  assert.ok(blockers.some(text => text.includes('at least one audio')));
+  assert.equal(blockers.some(text => /\brecordings?\b/i.test(text)), false);
 });
 
 test('rubric changes compare values rather than serialization order and clear when edits are reverted', () => {
@@ -174,7 +207,7 @@ test('test-name locales populate listening language and accent fit without chang
   assert.equal(original.language, 'auto');
   assert.ok(profileSchema.safeParse({ ...original, language: 'ko-KR' }).success);
   assert.match(DEFAULT_TEST_GUIDE, /\*\*Evaluate only the agent’s voice\*\*/);
-  assert.match(DEFAULT_TEST_GUIDE, /\*\*Do not evaluate or score the customer’s voice or speaking behavior\.\*\*/);
+  assert.equal(DEFAULT_TEST_GUIDE, 'This test evaluates the quality of a service agent’s voice in a call center context. You will hear recorded conversations between a customer and an agent or just an agent. If there are 2 people speaking, **Evaluate only the agent’s voice**; if only one people speaking, regardless the role, and compare it with how a natural, authentic voice typically sounds in real-world interactions.  All ratings and comments must focus exclusively on the agent, and your comments should be **as detailed and specific as possible**, describing the agent’s voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.');
 });
 
 function region(role: Region['role'] = 'speaker', confirmed = true): Region {
@@ -256,10 +289,26 @@ test('bulk language hints cover saved and imported inputs without changing selec
   assert.deepEqual(updated.map(({ language, ...rest }) => rest), saved.map(({ language, ...rest }) => rest));
   updated[1].language = 'Welsh English';
   assert.equal(updated[0].language, 'British English', 'Individual overrides remain independent.');
-  const imported = [{ id: 'one', language: 'auto', include: true, regions: [region()] }];
-  assert.deepEqual(applyLanguageHint(imported, 'Japanese'), [{ ...imported[0], language: 'Japanese' }]);
-  assert.throws(() => applyLanguageHint(saved, ' '));
-  assert.throws(() => applyLanguageHint(saved, 'x'.repeat(501)));
+  const imported = [
+    { id: 'one', language: 'auto', include: true, regions: [region()] },
+    { id: 'two', language: 'Italian', include: false, regions: [region()] },
+  ];
+  assert.deepEqual(applyLanguageHint(imported, 'Japanese'), imported.map(input => ({ ...input, language: 'Japanese' })));
+  for (const language of ['', ' ', 'x'.repeat(501)]) {
+    const updated = applyLanguageHint(saved, language);
+    assert.ok(updated.every(input => input.language === language.trim()), 'Incomplete draft edits propagate without throwing.');
+    const input = readyInput();
+    input.profile = withLanguageAccent(input.profile, language);
+    input.savedClips = updated;
+    assert.ok(evaluationBlockers(input).some(blocker => /language:/.test(blocker)), 'Readiness rejects invalid language before evaluation.');
+  }
+});
+test('automatic language hints display as Auto without changing stored hints or explicit language names', () => {
+  for (const value of ['auto', 'Auto', ' AUTO ']) assert.equal(displayLanguageHint(value), 'Auto');
+  for (const value of ['', 'Aut', 'British English', 'ko-KR']) assert.equal(displayLanguageHint(value), value);
+  const initial = newTestProfile();
+  assert.equal(displayLanguageHint(initial.language), 'Auto');
+  assert.equal(initial.language, 'auto');
 });
 test('setup reports invalid global language hints and overlong market descriptions before starting', () => {
   const input = readyInput();

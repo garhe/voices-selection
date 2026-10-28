@@ -6,12 +6,50 @@ import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { profile as baseProfile, assessment, clip, job } from './fixtures.js';
-import { RUBRIC_VERSION, DEFAULT_RUBRIC, type Rubric, type AudioDiagnostics, type Job } from '../shared/domain.js';
+import { RUBRIC_VERSION, DEFAULT_RUBRIC, unassessedInputs, normalizeAssessment, singleSpeakerFallbackCount, type Rubric, type AudioDiagnostics, type Job } from '../shared/domain.js';
 import { JudgeAudioError } from '../server/realtime.js';
 import { once } from 'node:events';
 import { createServer, request as httpRequest } from 'node:http';
 
 const profile = { ...baseProfile, target: 'Warm, calm and conversational.' };
+
+test('saved recording playback supports byte ranges for seeking without altering stored audio', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-playback-ranges-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const { app, errors, store } = await createApp({ dataDir: root, port: address.port });
+  app.use(errors); server.on('request', app);
+  try {
+    const audio = clip();
+    const pcm = randomBytes(48000);
+    await store.saveClip(audio, pcm);
+    const url = `http://127.0.0.1:${address.port}/api/clips/${audio.id}/audio`;
+    const full = await fetch(url);
+    assert.equal(full.status, 200);
+    assert.equal(full.headers.get('accept-ranges'), 'bytes');
+    const wav = Buffer.from(await full.arrayBuffer());
+    assert.deepEqual(wav.subarray(44), pcm);
+    for (const [range, start, end] of [['bytes=100-199', 100, 199], ['bytes=24000-', 24000, wav.length - 1], ['bytes=-100', wav.length - 100, wav.length - 1]] as const) {
+      const response = await fetch(url, { headers: { Range: range } });
+      assert.equal(response.status, 206);
+      assert.equal(response.headers.get('content-range'), `bytes ${start}-${end}/${wav.length}`);
+      assert.equal(Number(response.headers.get('content-length')), end - start + 1);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), wav.subarray(start, end + 1));
+    }
+    const invalid = await fetch(url, { headers: { Range: `bytes=${wav.length}-` } });
+    assert.equal(invalid.status, 416);
+    assert.equal(invalid.headers.get('content-range'), `bytes */${wav.length}`);
+    for (const range of ['bytes=not-a-range', 'items=0-10', 'bytes=0-9,100-109']) {
+      const response = await fetch(url, { headers: { Range: range } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), wav);
+    }
+    assert.deepEqual(await store.pcm(audio.id), pcm);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('rubric presets persist, protect revisions and built-in defaults, and never replace queued or redo snapshots', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-workbench-rubrics-'));
@@ -332,6 +370,139 @@ test('targeted audio retries preserve good verdicts and audit history, persist t
     }
     assert.equal(calls.length, 2, 'Earlier-rubric verdicts must not be mixed with new criteria.');
     assert.deepEqual(await store.read(path.join('jobs', `${legacy.id}.json`)), legacy);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('unassessed-file retries preserve successful judges, isolate files and recover missing results with audited failures', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-unassessed-retry-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const calls: string[] = [];
+  const { app, errors, store } = await createApp({
+    dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    evaluate: async options => {
+      calls.push(options.judge.id);
+      return { assessment: assessment(), responseFormat: 'function_call' };
+    },
+  });
+  app.use(errors); server.on('request', app);
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (id: string, body: unknown) => fetch(`${url}/api/jobs/${id}/resume`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  async function wait(id: string): Promise<Job> {
+    for (let n = 0; n < 100; n++) {
+      const value = await (await fetch(`${url}/api/jobs/${id}`)).json() as Job;
+      if (value.status !== 'running') return value;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('Timed out waiting for unassessed-file retry.');
+  }
+  try {
+    const clips = [clip({ file: 'folder/unassessable.wav' }), clip({ file: 'folder/unassessable.wav', start: 1, end: 2 }),
+      clip({ file: 'folder/failed.wav' }), clip({ file: 'folder/good.wav' })];
+    const original = job(clips, [4, 4]);
+    original.rubric = RUBRIC_VERSION;
+    original.results[0].assessment!.assessable = false;
+    original.results[0].assessment!.limitations = ['Overlapping speech prevents reliable assessment.'];
+    original.results[2].assessment!.languageSupported = false;
+    original.results[4].status = 'failed'; original.results[4].error = 'Previous service failure.';
+    delete original.results[4].assessment;
+    original.results.splice(5, 1);
+    for (const audio of clips) await store.saveClip(audio, Buffer.alloc(48000));
+    await store.saveJob(original);
+    assert.equal(unassessedInputs(original).length, 3);
+    for (const body of [
+      { consent: false, retryUnassessed: true },
+      { consent: true, retryUnassessed: true, retryAudioIssues: true },
+      { consent: true, file: clips[0].file },
+    ]) assert.equal((await post(original.id, body)).status, 400);
+    assert.equal((await post(original.id, { consent: true, retryUnassessed: true, file: 'foreign.wav' })).status, 404);
+    await store.remove(path.join('clips', `${clips[0].id}.pcm`));
+    assert.equal((await post(original.id, { consent: true, retryUnassessed: true, file: clips[0].file })).status, 409);
+    assert.deepEqual(await store.read(path.join('jobs', `${original.id}.json`)), original);
+    await store.saveClip(clips[0], Buffer.alloc(48000));
+    assert.equal((await post(original.id, { consent: true, retryUnassessed: true, file: clips[0].file })).status, 200);
+    const first = await wait(original.id);
+    assert.deepEqual(calls, [original.judges[0].id, original.judges[0].id], 'Only affected judges across this file’s windows rerun.');
+    assert.equal(unassessedInputs(first).length, 1);
+    for (const i of [0, 2]) {
+      assert.deepEqual(first.results[i].previousEvaluations![0].assessment, original.results[i].assessment);
+      assert.equal(first.results[i].assessment!.assessable, true);
+    }
+    for (const i of [1, 3, 4, 5, 6]) assert.deepEqual(first.results[i], original.results[i]);
+    assert.equal((await post(original.id, { consent: true, retryUnassessed: true, file: clips[0].file })).status, 409);
+    assert.equal((await post(original.id, { consent: true, retryUnassessed: true })).status, 200);
+    const done = await wait(original.id);
+    assert.equal(done.results.length, 8, 'A genuinely missing clip/judge pair is recreated.');
+    assert.equal(unassessedInputs(done).length, 0);
+    assert.equal(done.results[4].previousEvaluations![0].error, original.results[4].error);
+    assert.equal(done.results.at(-1)!.previousEvaluations, undefined, 'A missing result has no fictitious previous attempt.');
+    for (const i of [0, 1, 2, 3, 5, 6]) assert.deepEqual(done.results[i], first.results[i]);
+    assert.equal(calls.length, 4);
+    assert.deepEqual(await store.read(path.join('jobs', `${original.id}.json`)), done);
+    const legacy = { ...original, id: randomUUID(), rubric: 'audio-only-v2' };
+    await store.saveJob(legacy);
+    assert.equal((await post(legacy.id, { consent: true, retryUnassessed: true })).status, 409);
+    assert.deepEqual(await store.read(path.join('jobs', `${legacy.id}.json`)), legacy);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('explicit unassessed retries enable safe single-speaker fallback while preserving successful agent judgments and prior attempts', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-single-speaker-fallback-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  let calls = 0;
+  const { app, errors, store } = await createApp({
+    dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    evaluate: async options => {
+      calls++;
+      assert.equal(options.profile.singleSpeakerFallback, true);
+      assert.equal(options.role, 'agent');
+      return { assessment: normalizeAssessment({
+        ...assessment(), speakerAttribution: { role: 'agent', status: 'single_speaker_fallback', singleSpeaker: true,
+          evidence: 'The agent was not identified; one unambiguous assessable speaker is audible.' },
+      }, options.profile, options.role), responseFormat: 'function_call' };
+    },
+  });
+  app.use(errors); server.on('request', app);
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (id: string, body: unknown) => fetch(`${url}/api/jobs/${id}/resume`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  try {
+    const original = job([clip({ role: 'agent' })], [4, 4]);
+    original.rubric = RUBRIC_VERSION;
+    original.profile = { ...original.profile, scope: 'agent', speakerMode: 'automatic' };
+    for (const [index, result] of original.results.entries()) result.assessment = normalizeAssessment({
+      ...assessment(), speakerAttribution: { role: 'agent', status: index === 0 ? 'not_present' : 'identified',
+        evidence: index === 0 ? 'The agent role was not identified.' : 'The agent offers assistance.' },
+    }, original.profile, 'agent');
+    await store.saveClip(original.clips[0], Buffer.alloc(48000));
+    await store.saveJob(original);
+    assert.deepEqual(await store.read(path.join('jobs', `${original.id}.json`)), original);
+    assert.equal((await post(original.id, { consent: true, retryUnassessed: true, singleSpeakerFallback: false })).status, 400);
+    assert.equal((await post(original.id, { consent: true, retryUnassessed: true, singleSpeakerFallback: true })).status, 200);
+    let done: Job | undefined;
+    for (let n = 0; n < 100; n++) {
+      const current = await (await fetch(`${url}/api/jobs/${original.id}`)).json() as Job;
+      if (current.status === 'completed') { done = current; break; }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.ok(done, 'Fallback retry must finish.');
+    assert.equal(calls, 1);
+    assert.equal(done.profile.singleSpeakerFallback, true);
+    assert.equal(singleSpeakerFallbackCount(done), 1);
+    assert.equal(unassessedInputs(done).length, 0);
+    assert.deepEqual(done.results[1], original.results[1]);
+    assert.deepEqual(done.results[0].previousEvaluations![0].assessment, original.results[0].assessment);
+    assert.equal(done.results[0].assessment!.speakerAttribution!.status, 'single_speaker_fallback');
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });

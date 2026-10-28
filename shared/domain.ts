@@ -3,6 +3,9 @@ import { z } from 'zod';
 export const RUBRIC_VERSION = 'audio-only-v4';
 export const SAMPLE_RATE = 24000;
 export const MAX_SECONDS = 120;
+export function testType(stage: Profile['stage']): string {
+  return stage === 'audition' ? 'Voice Selection' : 'TTS evaluation';
+}
 export const dimensions = ['naturalness', 'articulation', 'pace', 'expressiveness', 'contextFit', 'accentFit', 'audioQuality'] as const;
 export type Dimension = typeof dimensions[number];
 export const labels: Record<Dimension, string> = {
@@ -18,7 +21,7 @@ export const voiceDimensionGuidance: Record<Dimension, string> = {
   accentFit: 'Fit of audible pronunciation, vowel/consonant patterns, stress and intonation to the explicitly supplied target market/accent, allowing its stated regional variation. Judge listener suitability, not personal accent preference, nationality, ethnicity, identity or supposed native-speaker status. Do not infer accent fit from the language hint or script, and do not penalize the same market mismatch again in other dimensions.',
   audioQuality: 'Audible fidelity, noise, distortion, dropouts and synthetic artifacts, not the quality of the spoken content. Its stage-specific rubric weight determines whether it contributes to preference.',
 };
-export const DEFAULT_TEST_GUIDE = 'This test evaluates the quality of a service agent’s voice in a call center context. You will hear recorded conversations between a customer and an agent. **Evaluate only the agent’s voice** and compare it with how a natural, authentic call center agent typically sounds in real-world interactions. **Do not evaluate or score the customer’s voice or speaking behavior.** All ratings and comments must focus exclusively on the agent, and your comments should be **as detailed and specific as possible**, describing the agent’s voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
+export const DEFAULT_TEST_GUIDE = 'This test evaluates the quality of a service agent’s voice in a call center context. You will hear recorded conversations between a customer and an agent or just an agent. If there are 2 people speaking, **Evaluate only the agent’s voice**; if only one people speaking, regardless the role, and compare it with how a natural, authentic voice typically sounds in real-world interactions.  All ratings and comments must focus exclusively on the agent, and your comments should be **as detailed and specific as possible**, describing the agent’s voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
 export const SINGLE_SPEAKER_TEST_GUIDE = 'This test evaluates the quality of a single speaker’s voice in a call center context. You will hear recordings of one speaker. **Evaluate only this speaker’s voice** and compare it with a natural, authentic voice in real-world call center interactions. All ratings and comments must focus exclusively on the recorded speaker, and your comments should be **as detailed and specific as possible**, describing the voice quality, naturalness, speaking style, delivery, and any noticeable strengths or issues that influenced your score.';
 export const BOTH_SPEAKERS_TEST_GUIDE = 'This test evaluates the quality of both the agent and customer voices in a call center conversation. **Evaluate the agent and customer separately**, comparing each voice with natural, authentic vocal delivery for that speaker’s role in real-world interactions. For each assessment, **score only the requested speaker’s voice**; do not let the other speaker’s delivery influence the ratings, and do not combine the two speakers into one score. Evaluate audible voice quality, naturalness, speaking style and delivery, not script content or service performance. Keep ratings and comments specific to the assessed speaker, with **detailed, recording-specific observations** about strengths or issues that influenced the score.';
 export const rubricDimensionSchema = z.object({
@@ -78,11 +81,12 @@ export type ConnectionStatus = {
   connectionSource: 'saved' | 'environment' | 'none'; secureStorageAvailable: boolean;
 };
 export type ConnectionTest = { judgeId: string; ok: boolean; model?: string; error?: string };
-export const languageHintSchema = z.string().trim().min(1, 'Enter a language/accent target or use auto.').max(500, 'Use at most 500 characters for the language/accent target.');
+export const languageHintSchema = z.string().trim().min(1, 'Enter a language/accent target or use Auto.').max(500, 'Use at most 500 characters for the language/accent target.');
 export const profileSchema = z.object({
   stage: z.enum(['audition', 'tts']),
   scope: z.enum(['single', 'agent', 'customer', 'both']),
   speakerMode: z.enum(['automatic', 'manual']).optional(),
+  singleSpeakerFallback: z.boolean().optional(),
   target: z.string().trim().min(1, 'Enter a target vocal style or test guide before starting the evaluation.').max(1500),
   language: languageHintSchema,
   targetMarket: z.string().trim().max(500).optional(),
@@ -93,6 +97,13 @@ export const profileSchema = z.object({
     ctx.addIssue({ code: 'custom', path: ['rubric', 'dimensions'], message: 'The rubric has no weighted dimensions active for this stage and target. Enable a dimension or supply its required target.' });
 });
 export type Profile = z.infer<typeof profileSchema>;
+export function mediaText(text: string, stage: Profile['stage']): string {
+  if (stage !== 'tts') return text;
+  return text.replace(/\brecordings?\b/gi, word => {
+    const audio = word.toLowerCase().endsWith('s') ? 'audio files' : 'audio';
+    return word[0] === 'R' ? audio[0].toUpperCase() + audio.slice(1) : audio;
+  });
+}
 export function profileRubric(profile: Pick<Profile, 'rubric'>): Rubric {
   return profile.rubric ?? DEFAULT_RUBRIC;
 }
@@ -157,7 +168,8 @@ export const assessmentSchema = z.object({
   assessable: z.boolean(),
   speakerAttribution: z.object({
     role: z.enum(['speaker', 'agent', 'customer']),
-    status: z.enum(['identified', 'not_present', 'uncertain']),
+    status: z.enum(['identified', 'not_present', 'uncertain', 'single_speaker_fallback']),
+    singleSpeaker: z.boolean().optional(),
     evidence: z.string().trim().min(1).max(1500),
   }).strict().optional(),
   scores: z.object({
@@ -213,10 +225,11 @@ export type Job = {
   rubric: string;
   voiceLabels?: VoiceLabel[];
   queueOrder?: number;
+  retrySelection?: { clipId: string; judgeId: string }[];
 };
 export type TestQueueState = {
-  paused: boolean; active?: { id: string; name: string };
-  waiting: { id: string; name: string }[]; error?: string;
+  paused: boolean; active?: { id: string; name: string; retry?: boolean };
+  waiting: { id: string; name: string; retry?: boolean }[]; error?: string;
 };
 export function evaluationName(value: { name?: string }): string {
   return value.name?.trim() || 'Untitled evaluation';
@@ -229,8 +242,19 @@ export function activeDimensions(profile: Profile): Dimension[] {
 export function mean(values: number[]): number | null {
   return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
 }
+export function hasScoringSpeaker(assessment: Assessment, profile: Profile, role?: Clip['role']): boolean {
+  if (profile.speakerMode !== 'automatic') return assessment.speakerAttribution?.status !== 'single_speaker_fallback';
+  const attribution = assessment.speakerAttribution;
+  if (!attribution || (role && attribution.role !== role)) return false;
+  return attribution.status === 'identified' || (attribution.status === 'single_speaker_fallback' &&
+    profile.singleSpeakerFallback === true && ['agent', 'both'].includes(profile.scope) &&
+    attribution.role === 'agent' && attribution.singleSpeaker === true);
+}
+export function singleSpeakerFallbackCount(job: Pick<Job, 'results'>): number {
+  return job.results.filter(result => result.status === 'completed' && result.assessment?.speakerAttribution?.status === 'single_speaker_fallback').length;
+}
 export function eligibleScore(assessment: Assessment, profile: Profile): number | null {
-  if (profile.speakerMode === 'automatic' && assessment.speakerAttribution?.status !== 'identified') return null;
+  if (!hasScoringSpeaker(assessment, profile)) return null;
   if (!assessment.assessable || !assessment.languageSupported) return null;
   const active = activeDimensions(profile);
   const scores = active.map(d => assessment.scores[d]);
@@ -257,10 +281,13 @@ export function retryableAudioIssue(result: JudgeResult): boolean {
 }
 export function normalizeAssessment(value: unknown, profile: Profile, role?: Clip['role']): Assessment {
   const assessment = assessmentSchema.parse(value);
+  if (assessment.speakerAttribution?.status === 'single_speaker_fallback' &&
+      (!hasScoringSpeaker(assessment, profile, role) || !assessment.assessable || !assessment.languageSupported))
+    throw new Error('Single-speaker fallback requires an enabled automatic agent evaluation, exactly one confirmed speaker and assessable supported-language speech.');
   if (profile.speakerMode === 'automatic') {
     if (!role || !assessment.speakerAttribution || assessment.speakerAttribution.role !== role)
       throw new Error('Automatic role evaluation requires attribution for the requested speaker role.');
-    if (assessment.speakerAttribution.status !== 'identified') {
+    if (!hasScoringSpeaker(assessment, profile, role)) {
       assessment.assessable = false;
       for (const d of dimensions) {
         assessment.scores[d] = null;
@@ -327,7 +354,7 @@ export function summarize(job: Job): Summary[] {
           r.assessment!.speakerAttribution.status === 'not_present')) {
           absentWindows++; requiredRegions--; continue;
         }
-        const scores = results.map(r => eligibleScore(r.assessment!, job.profile));
+        const scores = results.map(r => hasScoringSpeaker(r.assessment!, job.profile, c.role) ? eligibleScore(r.assessment!, job.profile) : null);
         const seconds = c.end - c.start;
         if (scores.every((s): s is number => s !== null)) {
           regionScores.push({ score: mean(scores)!, seconds });
@@ -371,7 +398,7 @@ export function assessmentGaps(result: JudgeResult | undefined, profile: Profile
       ? `Suspected judge audio-access misreport: Azure counted ${audioTokens} input audio tokens, but the judge claimed audio was missing. Scores remain withheld.`
       : 'Suspected missing-audio claim. Audio-token receipt is not confirmed; retry this input with audio-delivery diagnostics.');
   }
-  if (profile.speakerMode === 'automatic' && (a.speakerAttribution?.status !== 'identified' || a.speakerAttribution.role !== role))
+  if (!hasScoringSpeaker(a, profile, role))
     gaps.push(`Requested ${role} role ${a.speakerAttribution?.status ?? 'not attributed'}: ${a.speakerAttribution?.evidence ?? 'Role evidence is missing.'}`);
   if (!a.languageSupported) gaps.push(`The judge could not reliably assess the audio language (${a.language}).`);
   if (!a.assessable) gaps.push('The judge reported insufficient assessable target speech.');
@@ -381,6 +408,17 @@ export function assessmentGaps(result: JudgeResult | undefined, profile: Profile
 }
 
 export type EvidenceNote = { text: string; files: string[] };
+export function unassessedInputs(job: Job) {
+  return job.clips.flatMap(clip => {
+    const judges = job.judges.flatMap(judge => {
+      const result = job.results.find(result => result.clipId === clip.id && result.judgeId === judge.id);
+      const gaps = assessmentGaps(result, job.profile, clip.role);
+      return gaps.length ? [{ judge, result, gaps }] : [];
+    });
+    return judges.length ? [{ clip, judges }] : [];
+  });
+}
+
 export type VoiceEvidence = {
   voice: string; role: string; files: number; eligibleFiles: number; score: number | null;
   judges: {
@@ -419,7 +457,7 @@ export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
             dimension: d, score: own.dimensions[d], diagnostic: d === 'audioQuality' && !activeDimensions(job.profile).includes(d),
             reasons: notes(completed.flatMap(({ clip, result }) => {
               const a = result!.assessment!;
-              const identified = job.profile.speakerMode !== 'automatic' || (a.speakerAttribution?.status === 'identified' && a.speakerAttribution.role === clip.role);
+              const identified = hasScoringSpeaker(a, job.profile, clip.role);
               return identified && a.scores[d] !== null && (d === 'audioQuality' || (a.assessable && a.languageSupported))
                 ? [{ text: a.reasons[d], file: clip.file }] : [];
             })),

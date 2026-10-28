@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { testHistory, testNameMetadata, queryTests, defaultTestFilters, testMetadataSchema, testTableCsv, TEST_PAGE_SIZES, type TestHistory } from '../shared/history.js';
+import { canRetryUnassessedTest, testHistory, testStatusLabel, testNameMetadata, queryTests, defaultTestFilters, testMetadataSchema, testTableCsv, TEST_PAGE_SIZES, TEST_STATUS_FILTERS, type TestHistory } from '../shared/history.js';
 import { csvCell } from '../shared/csv.js';
 import { assessment, clip, job } from './fixtures.js';
 import { createElement } from 'react';
@@ -13,9 +13,11 @@ import { DatePicker, calendarDateKey, calendarDays, parseCalendarDate, shiftCale
 import { ThemePicker } from '../src/ThemePicker.js';
 import { App } from '../src/App.js';
 import { RubricEditor } from '../src/RubricEditor.js';
-import { DEFAULT_RUBRIC } from '../shared/domain.js';
+import { DEFAULT_RUBRIC, unassessedInputs } from '../shared/domain.js';
+import { FolderSorter } from '../src/FolderSorter.js';
 import { profile } from './fixtures.js';
 import { DEFAULT_THEME_COLOR, themeFamilies, themePalette, themePresets, validThemeColor } from '../src/theme.js';
+import { AudioPlayer } from '../src/AudioPlayer.js';
 
 test('rubric editor exposes saved presets, seven editable dimensions, stage weights and single-speaker defaults', () => {
   const html = renderToStaticMarkup(createElement(RubricEditor, {
@@ -66,7 +68,7 @@ test('shared surfaces keep opaque fallbacks, readable headers and flat native ch
 
 test('foreground layers share translucent backdrop blur with solid accessibility fallbacks', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
-  const overlays = css.match(/\.confirmation-dialog, \.test-action-menu, \.date-menu, \.theme-menu \{([^}]+)\}/)?.[1];
+  const overlays = css.match(/\.confirmation-dialog, \.test-action-menu, \.date-menu, \.theme-menu, \.evaluation-action-bar \{([^}]+)\}/)?.[1];
   assert.ok(overlays);
   assert.match(overlays, /-webkit-backdrop-filter: var\(--mica-flyout-filter\)/);
   assert.match(overlays, /backdrop-filter: var\(--mica-flyout-filter\)/);
@@ -180,7 +182,7 @@ test('interface palettes reject invalid colors and retain white-label contrast a
   }
   assert.equal(themePalette('#ABCDEF')['--theme-color'], '#abcdef');
   const defaultPalette = themePalette(DEFAULT_THEME_COLOR);
-  const changedKeys = ['--theme-page', '--theme-glow', '--theme-surface-rgb', '--theme-panel-rgb', '--theme-sidebar-rgb', '--theme-inset-rgb', '--theme-selected', '--theme-header', '--theme-accent'];
+  const changedKeys = ['--theme-page', '--theme-glow', '--theme-surface-rgb', '--theme-panel-rgb', '--theme-sidebar-rgb', '--theme-inset-rgb', '--theme-selected', '--theme-header', '--theme-accent', '--theme-text', '--theme-muted'];
   const violet = themePalette('#7c3aed');
   for (const key of changedKeys) assert.notEqual(violet[key], defaultPalette[key], key);
   for (const r of [0, 51, 102, 153, 204, 255]) for (const g of [0, 51, 102, 153, 204, 255]) for (const b of [0, 51, 102, 153, 204, 255]) {
@@ -194,12 +196,19 @@ test('interface palettes reject invalid colors and retain white-label contrast a
     }).reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0);
     const rowHover = palette['--theme-row-hover'].match(/\d+/g)!.map(Number);
     const surface = palette['--theme-surface-rgb'].split(',').map(Number);
-    assert.ok((luminanceOf(rowHover) + .05) / (luminanceOf([41, 48, 57]) + .05) >= 4.5, `Hovered row text contrast for ${color}`);
+    const text = palette['--theme-text'].match(/\d+/g)!.map(Number);
+    const muted = palette['--theme-muted'].match(/\d+/g)!.map(Number);
+    const accent = palette['--theme-accent'].match(/\d+/g)!.map(Number);
+    assert.ok(text.every((channel, i) => channel <= accent[i]), `Darker themed foreground for ${color}`);
+    for (const [name, foreground] of [['body', text], ['muted', muted]] as const) {
+      assert.ok((luminanceOf(surface) + .05) / (luminanceOf(foreground) + .05) >= 4.5, `${name} text contrast on surfaces for ${color}`);
+      assert.ok((luminanceOf(rowHover) + .05) / (luminanceOf(foreground) + .05) >= 4.5, `${name} text contrast on hovered rows for ${color}`);
+    }
     assert.ok((luminanceOf(surface) + .05) / (luminanceOf(rowHover) + .05) >= 1.3, `Visible row hover fill for ${color}`);
     const primaryHover = palette['--theme-accent-hover'].match(/\d+/g)!.map(Number);
     assert.ok(1.05 / (luminanceOf(primaryHover) + .05) >= 4.5, `White primary hover label contrast for ${color}`);
     const darkestDialogGlass = glass.map(channel => .06 * 255 + .94 * .82 * channel);
-    assert.ok((luminanceOf(darkestDialogGlass) + .05) / (luminanceOf([41, 48, 57]) + .05) >= 4.5, `Dark foreground contrast over dimmed dialog glass for ${color}`);
+    assert.ok((luminanceOf(darkestDialogGlass) + .05) / (luminanceOf(text) + .05) >= 4.5, `Dark foreground contrast over dimmed dialog glass for ${color}`);
     const channels = palette['--theme-accent'].match(/\d+/g)!.map(Number).map(value => {
       const channel = value / 255;
       return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
@@ -271,6 +280,53 @@ function entries(count: number): TestHistory[] {
   }));
 }
 
+test('Completed* identifies any missing, failed, unassessable or partial assessment without changing saved status', () => {
+  const complete = job();
+  assert.equal(testStatusLabel(testHistory(complete)), 'Completed');
+  for (const change of [
+    (value: typeof complete) => { value.results[0].assessment!.assessable = false; },
+    (value: typeof complete) => { value.results[0].assessment!.languageSupported = false; },
+    (value: typeof complete) => { value.results[0].assessment!.scores.naturalness = null; },
+    (value: typeof complete) => { value.results[0].status = 'failed'; delete value.results[0].assessment; },
+    (value: typeof complete) => { value.results.shift(); },
+    (value: typeof complete) => { value.profile.speakerMode = 'automatic'; },
+  ]) {
+    const value = structuredClone(complete);
+    change(value);
+    assert.equal(testStatusLabel(testHistory(value)), 'Completed*');
+    assert.ok(unassessedInputs(value).length);
+    assert.equal(value.status, 'completed', 'Completion marker is derived, not a new persisted job status.');
+    value.status = 'running';
+    assert.equal(testStatusLabel(testHistory(value)), 'Running');
+  }
+  const diagnostic = structuredClone(complete);
+  diagnostic.results[0].assessment!.scores.audioQuality = null;
+  assert.equal(testHistory(diagnostic).incomplete, false, 'An excluded diagnostic score is not a missing required assessment.');
+  const noop = () => {};
+  const html = renderToStaticMarkup(createElement(TestLibrary, {
+    entries: [{ ...testHistory(complete), incomplete: true }], busy: false, pageSize: 30, onPageSizeChange: noop,
+    selectedIds: [], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onRetryUnassessed: noop, onOpen: noop, onEdit: noop,
+    onDelete: noop, onDownload: noop, onRegenerate: noop, onRefresh: noop,
+  }));
+  assert.match(html, />Completed\*<\/span>/);
+});
+
+test('test status labels use title case without changing stored status or semantic color classes', () => {
+  for (const status of ['completed', 'running', 'queued', 'interrupted', 'cancelled'] as const)
+    assert.equal(testStatusLabel({ status }), status[0].toUpperCase() + status.slice(1));
+  assert.equal(testStatusLabel({ status: 'completed', incomplete: true }), 'Completed*');
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.status-badge \{ color: var\(--theme-heading\); text-transform: capitalize; \}/);
+});
+
+test('sidebar expansion loads another batch in place rather than linking to the test library', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /history\.slice\(0, recentLimit\)/);
+  assert.match(source, /onClick=\{\(\) => setRecentLimit\(limit => limit \+ RECENT_TEST_BATCH\)\}/);
+  assert.doesNotMatch(source, />View all /);
+  assert.doesNotMatch(source, />Back to all tests</);
+});
+
 test('compact list renders 30 rows, separate fields and one quick-action dropdown per test', () => {
   const values = entries(61);
   values[59].status = 'running';
@@ -278,7 +334,7 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   values[60].bestVoices = ['Talent 60', 'Tied talent B', 'Tied talent C'].map(voice => ({ voice, role: 'speaker' }));
   const noop = () => {};
   const html = renderToStaticMarkup(createElement(TestLibrary, {
-    entries: values, busy: false, pageSize: 30, onPageSizeChange: noop, selectedIds: [], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
+    entries: values, busy: false, pageSize: 30, onPageSizeChange: noop, selectedIds: [], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onRetryUnassessed: noop, onOpen: noop, onEdit: noop, onDelete: noop,
     onDownload: noop, onRegenerate: noop, onRefresh: noop,
   }));
   const body = html.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1];
@@ -297,7 +353,7 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   assert.equal((body.match(/aria-label="Select test /g) ?? []).length, 30);
   assert.equal((body.match(/type="checkbox"[^>]*disabled=""/g) ?? []).length, 2);
   assert.match(html, /aria-label="Select all eligible tests on this page"/);
-  for (const field of ['Test name', 'Test time', 'Best voice', 'Best score', 'Language', 'Gender', 'Actions']) {
+  for (const field of ['Test name', 'Test time', 'Test type', 'Best voice', 'Best score', 'Language', 'Gender', 'Actions']) {
     assert.equal((body.match(new RegExp(`data-label="${field}"`, 'g')) ?? []).length, 30);
     assert.ok(html.includes(`<th scope="col">${field}</th>`));
   }
@@ -305,7 +361,11 @@ test('compact list renders 30 rows, separate fields and one quick-action dropdow
   assert.match(html, /title="Talent 60 \/ speaker, Tied talent B \/ speaker, Tied talent C \/ speaker"/);
   const toolbar = html.split('<div class="test-filters">')[1]?.split('<div class="test-list-meta">')[0];
   assert.ok(toolbar);
-  assert.equal((toolbar.match(/<label/g) ?? []).length, 6);
+  assert.equal((toolbar.match(/<label/g) ?? []).length, 7);
+  assert.match(toolbar, /<label>Test Status<select>/);
+  assert.match(toolbar, /<option value=""[^>]*>All statuses<\/option>/);
+  for (const status of TEST_STATUS_FILTERS)
+    assert.match(toolbar, new RegExp(`<option value="${status}">${status === 'incomplete' ? 'Completed\\*' : testStatusLabel({ status })}</option>`));
   assert.match(toolbar, /<label[^>]*>From date<\/label>/);
   assert.match(toolbar, /<label[^>]*>To date<\/label>/);
   assert.equal((toolbar.match(/class="date-menu"/g) ?? []).length, 2);
@@ -325,7 +385,7 @@ test('report page size controls, row counts, captions and ranges agree for every
   for (const size of TEST_PAGE_SIZES) {
     const html = renderToStaticMarkup(createElement(TestLibrary, {
       entries: entries(65), busy: false, pageSize: size, onPageSizeChange: noop,
-      selectedIds: ['64'], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
+      selectedIds: ['64'], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onRetryUnassessed: noop, onOpen: noop, onEdit: noop, onDelete: noop,
       onDownload: noop, onRegenerate: noop, onRefresh: noop,
     }));
     const body = html.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1];
@@ -385,7 +445,7 @@ test('bulk selection counts eligible tests across pages and excludes running and
   const noop = () => {};
   const html = renderToStaticMarkup(createElement(TestLibrary, {
     entries: values, busy: false, pageSize: 30, onPageSizeChange: noop, selectedIds: ['0', '60', '59', '58', 'deleted'],
-    onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onOpen: noop, onEdit: noop, onDelete: noop,
+    onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onRetryUnassessed: noop, onOpen: noop, onEdit: noop, onDelete: noop,
     onDownload: noop, onRegenerate: noop, onRefresh: noop,
   }));
   assert.match(html, /2 selected/);
@@ -395,6 +455,39 @@ test('bulk selection counts eligible tests across pages and excludes running and
   assert.match(html, /Clear selection/);
   assert.match(html, /aria-label="Select test Test 61"[^>]*checked=""/);
   assert.equal((html.match(/aria-label="Select test [^"]*"[^>]*checked=""/g) ?? []).length, 1);
+});
+
+test('one-click selected retries include only Completed* tests across pages and disable while busy', () => {
+  for (const status of ['completed', 'running', 'queued', 'cancelled', 'interrupted'] as const) {
+    assert.equal(canRetryUnassessedTest({ status, incomplete: true }), status === 'completed');
+    assert.equal(canRetryUnassessedTest({ status, incomplete: false }), false);
+    assert.equal(canRetryUnassessedTest({ status }), false);
+  }
+  const values = entries(61);
+  values[0].incomplete = true;
+  values[60].incomplete = true;
+  values[59].status = 'running'; values[59].incomplete = true;
+  values[58].status = 'queued'; values[58].incomplete = true;
+  const noop = () => {};
+  const render = (selectedIds: string[], busy = false) => renderToStaticMarkup(createElement(TestLibrary, {
+    entries: values, busy, pageSize: 30, onPageSizeChange: noop, selectedIds,
+    onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onRetryUnassessed: noop,
+    onOpen: noop, onEdit: noop, onDelete: noop, onDownload: noop, onRegenerate: noop, onRefresh: noop,
+  }));
+  const selectedIds = ['0', '60', '59', '58', '1', 'deleted'];
+  assert.match(render(selectedIds), />Retry all unassessable \(2\)<\/button>/);
+  assert.match(render(selectedIds, true), /<button[^>]*disabled=""[^>]*>Retry all unassessable \(2\)<\/button>/);
+  assert.doesNotMatch(render(['1', '59', '58']), />Retry all unassessable/);
+  assert.match(render(selectedIds), /class="status-badge completed" data-incomplete="true"/);
+  assert.match(render(selectedIds), /class="status-badge completed" data-incomplete="false"/);
+});
+
+test('Completed* has lighter semantic greens and retains system high-contrast rendering', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.status-badge\.completed\[data-incomplete=true\] \{ background: #effbf2; color: #39734a; \}/);
+  assert.match(css, /\.history-item \.status-badge\.completed\[data-incomplete=true\] \{ background: none; color: #d6e5d9; \}/);
+  const forcedColors = css.split('@media (forced-colors: active)')[1];
+  assert.match(forcedColors, /\.status-badge\.completed\[data-incomplete=true\], \.history-item \.status-badge\.completed\[data-incomplete=true\],[^}]*background: Canvas; color: CanvasText;/);
 });
 
 test('confirmation uses a named modal dialog with a description instead of an inline card', () => {
@@ -476,6 +569,29 @@ test('search and combined filters apply before pagination and search all saved t
   assert.equal(queryTests(values, { ...defaultTestFilters, gender: 'Unspecified' }, 1).total, 0);
 });
 
+test('status filters separate Completed from Completed* and combine globally with the other filters', () => {
+  const values = entries(240);
+  values.forEach((entry, index) => {
+    const status = TEST_STATUS_FILTERS[index % TEST_STATUS_FILTERS.length];
+    entry.status = status === 'incomplete' ? 'completed' : status;
+    entry.incomplete = status === 'incomplete';
+  });
+  for (const status of TEST_STATUS_FILTERS) {
+    const result = queryTests(values, { ...defaultTestFilters, status }, 99);
+    assert.equal(result.total, 40);
+    assert.equal(result.page, 2);
+    assert.equal(result.entries.length, 10);
+    assert.ok(result.entries.every(entry => testStatusLabel(entry) === (status === 'incomplete' ? 'Completed*' : testStatusLabel({ status }))));
+  }
+  const combined = queryTests(values, {
+    ...defaultTestFilters, status: 'completed', search: 'Talent 6', language: 'Italian', gender: 'Male',
+    dateFrom: '2026-10-01', dateTo: '2026-10-01',
+  }, 1);
+  assert.deepEqual(combined.entries.map(entry => entry.id).sort(), ['6', '60', '66'].sort());
+  assert.equal(queryTests(values, defaultTestFilters, 1).total, 240);
+  assert.equal(defaultTestFilters.status, '');
+});
+
 test('pagination supports exactly 30, 40 and 50 rows with global filtering and stale-page clamping', () => {
   const values = entries(101);
   for (const size of TEST_PAGE_SIZES) {
@@ -525,11 +641,12 @@ test('selected-test CSV separates names, overall scores and judge scores for tie
   const snapshot = JSON.stringify(values);
   const csv = testTableCsv(values);
   const table = csvTable(csv);
-  assert.equal(table.headers.length, 16, 'Four metadata columns and four voice groups of three columns.');
+  assert.equal(table.headers.length, 17, 'Five metadata columns and four voice groups of three columns.');
   assert.ok(table.headers.every(header => !/\brole\b/i.test(header)), 'No role columns are exported.');
   const [first, second] = table.rows;
   assert.equal(first['Test name'], scored.name);
   assert.equal(first['Test time'], scored.createdAt);
+  assert.equal(first['Test type'], 'Voice Selection');
   assert.equal(first.Locale, 'en-GB');
   assert.equal(first.Gender, 'Female');
   assert.equal(first['Best voice 1 name'], 'Tied, "voice"');
@@ -550,7 +667,7 @@ test('selected-test CSV separates names, overall scores and judge scores for tie
   assert.equal(second.Locale, 'Not specified');
   assert.equal(second.Gender, 'Unspecified');
   assert.equal(testTableCsv(Array.from({ length: 65 }, () => scored)).split('\r\n').length, 66, 'Exports are not limited to the visible page.');
-  assert.equal(testTableCsv([]), '\uFEFF"Test name","Test time","Locale","Gender","Best voice name","Best voice overall score"');
+  assert.equal(testTableCsv([]), '\uFEFF"Test name","Test time","Test type","Locale","Gender","Best voice name","Best voice overall score"');
   assert.equal(JSON.stringify(values), snapshot);
   const only = job([clip({ voice: 'Only winner' })], [5]);
   const single = csvTable(testTableCsv([only]));
@@ -571,6 +688,217 @@ test('selected reports preserve per-judge duration-weighted regions and equal re
   assert.equal(row['Best voice overall score'], '3.00');
   assert.equal(row['Best voice - Judge 1 (deployment-0) average score'], '2.25');
   assert.equal(row['Best voice - Judge 2 (deployment-1) average score'], '3.75');
+});
+
+test('test type is visible for both evaluation stages in list rows and selected-test CSVs', () => {
+  const noop = () => {};
+  const values = entries(2);
+  values[0].stage = 'tts';
+  const html = renderToStaticMarkup(createElement(TestLibrary, {
+    entries: values, busy: false, pageSize: 30, onPageSizeChange: noop,
+    selectedIds: [], onSelectionChange: noop, onExportSelected: noop, onBulkAction: noop, onRetryUnassessed: noop,
+    onOpen: noop, onEdit: noop, onDelete: noop, onDownload: noop, onRegenerate: noop, onRefresh: noop,
+  }));
+  assert.match(html, /data-label="Test type">TTS evaluation<\/td>/);
+  assert.match(html, /data-label="Test type">Voice Selection<\/td>/);
+  const human = job();
+  const tts = job(); tts.profile = { ...tts.profile, stage: 'tts' };
+  assert.deepEqual(csvTable(testTableCsv([human, tts])).rows.map(row => row['Test type']), ['Voice Selection', 'TTS evaluation']);
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /testType: testType\(job.profile.stage\)/, 'JSON report exports include the readable type.');
+  assert.match(source, /const rubricColumns = \[[^\n]*'test_type'/);
+  assert.match(source, /return \[[^\n]*testType\(profile.stage\)/, 'All CSV exports using rubric cells include type.');
+});
+
+test('setup sections support native collapse and queue/start actions live in the fixed action region', () => {
+  const html = renderToStaticMarkup(createElement(App));
+  assert.equal((html.match(/<details class="card setup-section" open=""/g) ?? []).length, 2);
+  assert.match(html, /<summary><span>01 · Choose your evaluation/);
+  assert.match(html, /<summary><span>02 · Your judging panel/);
+  assert.match(html, /class="evaluation-action-bar" role="region" aria-label="Evaluation actions"/);
+  assert.match(html, /Review readiness &amp; usage/);
+  assert.match(html, /class="setup-grid" data-evaluation-open="true" data-panel-open="true"/);
+  assert.match(html, /<details class="card recordings-card setup-section" open=""/);
+  assert.match(html, /<summary><span>03 · Bring your recordings/);
+  assert.match(html, /0 recordings · 0 voices · 0 included/);
+  assert.match(html, />Add to queue<\/button>/);
+  assert.match(html, /03<\/span> Folder sorting/);
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.evaluation-action-bar\{position:fixed;bottom:0;/);
+  const actionBar = css.match(/\.evaluation-action-bar\{([^}]+)\}/)?.[1];
+  assert.ok(actionBar);
+  assert.match(actionBar, /background:var\(--mica-flyout-sheen\),var\(--mica-flyout\)/);
+  assert.doesNotMatch(actionBar, /opacity:/);
+  const contrast = css.slice(css.lastIndexOf('@media (forced-colors: active)'));
+  assert.match(contrast, /--mica-flyout:\s*Canvas;/);
+  assert.match(contrast, /\.evaluation-action-bar \{\s*background: Canvas;/);
+  assert.match(css, /\.setup-workspace\{padding-bottom:calc\(var\(--evaluation-actions-height,136px\) \+ 24px\)\}/);
+  assert.match(css, /grid-template-areas:"evaluation panel" "recordings recordings"/);
+  assert.match(css, /\[data-evaluation-open=false\]\[data-panel-open=true\]\{grid-template-areas:"evaluation panel" "recordings panel";grid-template-rows:min-content 1fr/);
+  assert.match(css, /\[data-evaluation-open=true\]\[data-panel-open=false\]\{grid-template-areas:"evaluation panel" "evaluation recordings";grid-template-rows:min-content 1fr/);
+  assert.match(css, /grid-template-areas:"evaluation" "panel" "recordings"/);
+  assert.match(css, /@container\(max-width:680px\)/);
+  assert.match(css, /\.recordings-card \.recording-workspace\{grid-template-columns:minmax\(0,1fr\);gap:20px\}/);
+});
+
+test('audio playback keeps one native playback track with no extra timeline or instructional text', () => {
+  const html = renderToStaticMarkup(createElement(AudioPlayer, { src: '/test.wav', label: 'Saved recording' }));
+  assert.match(html, /<audio[^>]*controls=""[^>]*preload="metadata"/);
+  assert.equal((html.match(/<audio /g) ?? []).length, 1);
+  assert.match(html, /aria-label="Saved recording"/);
+  assert.doesNotMatch(html, /type="range"|<output|<small|Click or drag/);
+});
+
+test('unassessed inputs expose exact saved audio with honest role/language guidance and separated report actions', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const section = source.split('aria-label="Unassessed files"')[1].split('job.rubric === RUBRIC_VERSION')[0];
+  assert.match(section, /<AudioPlayer src=\{`\/api\/clips\/\$\{clip.id\}\/audio`\}/);
+  assert.match(section, /label=\{`Verify \$\{clip.file\}, \$\{clip.role\}/);
+  assert.match(section, /Duration measures the length of the saved audio, not the presence of speech/);
+  assert.match(section, /Role attribution is a model judgment and can be wrong/);
+  assert.match(section, /it does not prove that the recording has no identifiable language/);
+  assert.match(section, /Role \/ language verdict needs verification/);
+  assert.match(section, /The saved assessment has not been changed/);
+  assert.doesNotMatch(section, /Playback time starts at zero for this input window/);
+  assert.match(source, /className="status-metadata"/);
+  assert.match(source, /className="status-actions"/);
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.status-strip \{[^}]*margin-bottom: 24px/);
+  assert.match(css, /\.primary, \.secondary, \.text-button \{[^}]*padding: 10px 16px; min-height: 44px/);
+  assert.match(css, /\.evaluation-action-bar \.run-actions \{ display: contents; \}/);
+  assert.match(css, /\.rubric-editor,[^}]*summary \{ padding: 10px 14px/);
+  assert.match(css, /--mica-text: var\(--theme-text\)/);
+});
+
+test('test titles remain text links and status colors stay semantic rather than following the theme', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.test-name, \.test-ties \{ padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; \}/);
+  const controls = css.match(/:is\((\.secondary,[^)]+)\) \{/);
+  assert.ok(controls);
+  assert.doesNotMatch(controls[1], /\.test-name|\.test-ties/);
+  for (const selector of css.matchAll(/:is\(([^)]+)\):enabled:hover/g))
+    assert.doesNotMatch(selector[1], /\.test-name|\.test-ties/);
+  assert.match(css, /\.status-badge\.completed \{ background: #dcfce7; color: #166534; \}/);
+  assert.match(css, /\.status-badge\.running \{ background: #fef3c7; color: #854d0e; \}/);
+  assert.match(css, /\.status-badge\.queued \{ background: #fee2e2; color: #991b1b; \}/);
+  assert.match(css, /\.status-badge, \.status-badge\.completed, \.status-badge\.running, \.status-badge\.queued,[^}]*background: Canvas; color: CanvasText/);
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /className=\{`status-badge \$\{h.status\}`\}/);
+  assert.match(source, /className=\{`status-badge \$\{r.status\}`\}/);
+});
+
+test('expandable headings are plain full-row disclosures rather than nested button surfaces', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /summary \{ padding: 8px 13px; cursor: pointer; border: 0; border-radius: 0; background: none; box-shadow: none; \}/);
+  assert.match(css, /\.clip-detail > summary \{ margin: 0 -16px; padding: 10px 16px; \}/);
+  assert.doesNotMatch(css, /summary:hover/);
+  assert.match(css, /summary:focus-visible[^{]*\{ outline-color: var\(--mica-focus\)/);
+  assert.match(css, /\.setup-section > summary \{[^}]*text-align: left;[^}]*list-style: none;/);
+  assert.match(css, /\.setup-section > summary small \{ margin-left: 0; \}/);
+});
+
+test('recording import uses one persistent drop area and consistent spacing instead of a duplicate folder button', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const section = source.split('<div className="recordings-content setup-section-content">')[1].split('</details>')[0];
+  assert.doesNotMatch(section, /\+ Select folder|Select folder remains available/);
+  assert.equal((section.match(/className="dropzone"/g) ?? []).length, 1);
+  assert.ok(section.indexOf('className="dropzone"') < section.indexOf('{savedClips !== undefined ?'));
+  assert.match(section, /folder\.current\.value = ''; folder\.current\.click\(\)/);
+  assert.match(section, /type="file" multiple hidden/);
+  assert.match(section, /data-has-inputs=\{savedClips !== undefined \|\| records\.length > 0\}/);
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.recordings-content\{display:flex;flex-direction:column;gap:16px\}/);
+  assert.match(css, /\.recordings-intro\{display:grid;gap:8px\}/);
+});
+
+test('rubric and result disclosure rows share the content inset with markers inside the row', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /:is\(\.rubric-editor, \.voice-evidence, \.voice-coaching, \.voice-matrix\) summary \{ padding-inline: 0; list-style-position: inside; \}/);
+  assert.doesNotMatch(css, /list-style-position: outside/);
+});
+
+test('language edits automatically update all draft inputs and Auto is formatted consistently without an apply button', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /Apply to all recordings|applyLanguageToAll|Applying language hint/);
+  assert.match(source, /onChange=\{e => updateLanguageAccent\(e\.target\.value\)\}/);
+  const update = source.split('function updateLanguageAccent(language: string) {')[1].split('function updateRegion')[0];
+  assert.match(update, /setProfile\(previous => withLanguageAccent\(previous, language\)\)/);
+  assert.match(update, /setRecords\(previous => applyLanguageHint\(previous, language\)\)/);
+  assert.match(update, /setSavedClips\(previous => previous === undefined \? undefined : applyLanguageHint\(previous, language\)\)/);
+  assert.match(source, /value=\{displayLanguageHint\(profile\.language\)\}/);
+  assert.match(source, /\{displayLanguageHint\(job\.profile\.language\)\}/);
+  assert.match(source, /placeholder="Auto, British English/);
+});
+
+test('result views include the complete evaluation without a judge-language filter', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /languageFilter|setLanguageFilter|filteredJob|All languages \(not controlled\)|follows the language filter|Language filtering requires/);
+  assert.match(source, /const summary = job \? summarize\(job\) : \[\]/);
+  assert.match(source, /const voiceEvidence = job \? summarizeVoiceEvidence\(job\) : \[\]/);
+  assert.match(source, /<VoiceImprovement job=\{job\} voices=\{voiceDirectorBriefs\(job\)\}/);
+  assert.match(source, /\{job\.clips\.map\(c => <details className="clip-detail"/);
+});
+
+test('setup disclosures share compact vertical spacing and inset markers with aligned descriptions', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.setup-section\.card \{ padding: 0; \}/);
+  assert.match(css, /\.setup-section > summary \{[^}]*grid-template-columns: 12px minmax\(0, 1fr\);[^}]*column-gap: 12px;[^}]*padding: 16px 24px;/);
+  assert.match(css, /\.setup-section-content\{padding:0 24px 24px\}/);
+  assert.match(css, /\.setup-section > summary > span, \.setup-section > summary small \{ grid-column: 2; min-width: 0; overflow-wrap: anywhere; \}/);
+  assert.match(css, /\.setup-section\[open\] > summary::before \{ transform: rotate\(90deg\); \}/);
+});
+
+test('recent evaluation statuses are compact muted text and dimension ratings have tighter spacing', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.history-item \.status-badge \{[^}]*padding: 0; border: 0; background: none; font-size: \.6875rem;[^}]*text-transform: none; letter-spacing: 0;/);
+  assert.match(css, /\.history-item \.status-badge\.completed \{ color: #b8cdbf; \}/);
+  assert.match(css, /\.history-item \.status-badge\.running \{ color: #d6c69d; \}/);
+  assert.match(css, /\.history-item \.status-badge\.queued \{ color: #d2b2b2; \}/);
+  assert.match(css, /\.history-item:enabled:hover \{ background: #ffffff14;/);
+  assert.match(css, /\.voice-matrix \.matrix-ratings li \{ margin: 3px 0; font-size: var\(--text-caption\); line-height: 1.5; \}/);
+});
+
+test('all UI retry actions use the queue without blocking behind unrelated tests or falling back to legacy resume', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /api<Job>\(`\/api\/jobs\/\$\{source.id\}\/retry`/);
+  assert.doesNotMatch(source, /\/resume/);
+  assert.match(source, /enqueueRetry\(job, \{ retryUnassessed: true \}\)/);
+  assert.match(source, /enqueueRetry\(job, \{ retryUnassessed: true, file \}\)/);
+  assert.match(source, /enqueueRetry\(job, \{ retryAudioIssues: true \}\)/);
+  assert.match(source, /enqueueRetry\(job, \{ retryUnassessed: false \}\)/);
+  const blocker = source.match(/const retryBlocked = ([^;]+);/)?.[1];
+  assert.ok(blocker);
+  assert.doesNotMatch(blocker, /queue\?/);
+  assert.match(blocker, /job\?\.status === 'running'.*job\?\.status === 'queued'/);
+  assert.match(source, /Queued retries require the updated local server/);
+  assert.match(source, /No retry was queued/);
+});
+
+test('folder sorting UI defaults to keeping originals and exposes unlimited inputs and output options', () => {
+  const html = renderToStaticMarkup(createElement(FolderSorter, {
+    busy: false, onAction: async () => {}, onPreview: async () => { throw new Error('Not called during render.'); },
+    onApply: async () => { throw new Error('Not called during render.'); },
+  }));
+  assert.match(html, /one absolute path per line/);
+  assert.match(html, /no folder-count limit/);
+  assert.match(html, /0 directories entered/);
+  assert.match(html, /with or without surrounding double quotes/);
+  assert.match(html, /Spaces in paths are preserved/);
+  assert.doesNotMatch(html, /up to 20/);
+  assert.match(html, /value="keep" selected/);
+  assert.match(html, /Output parent directory/);
+  assert.match(html, /Output folder name format/);
+  assert.match(html, /\{name\}_sorted/);
+  assert.match(html, /Original folders and all their contents remain unchanged/);
+  assert.match(html, /Replace originals/);
+  assert.match(html, /Preview sorting/);
+  assert.doesNotMatch(html, />Confirm replacement<\/button>/);
+  assert.match(html, /class="card sorting-form"/);
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.sorting-form\{display:grid;gap:20px\}/);
+  assert.match(css, /\.sorting-form>\.field-row\{[^}]*gap:20px;margin:0;/);
+  assert.match(css, /\.sorting-form>button\{justify-self:start;margin-top:4px\}/);
+  assert.match(css, /@media\(max-width:900px\)\{\.sorting-form>\.field-row\{grid-template-columns:1fr\}\}/);
 });
 
 test('every ranked other voice exports its overall score separately from its name and judge averages', () => {

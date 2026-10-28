@@ -1,5 +1,5 @@
 import {
-  activeDimensions, eligibleScore, evaluationName, summarize, summarizeVoiceEvidence, RUBRIC_VERSION,
+  activeDimensions, eligibleScore, evaluationName, summarize, summarizeVoiceEvidence, mediaText, RUBRIC_VERSION,
   type Assessment, type Dimension, type EvidenceNote, type Job, type StoredClip,
 } from './domain.js';
 
@@ -121,6 +121,7 @@ function directorSources(job: Job, voice: string, role: string) {
 }
 
 export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
+  const w = (text: string) => mediaText(text, job.profile.stage);
   const summaries = summarize(job);
   return summaries.map(own => {
     const enoughFeedback = own.eligibleFiles > 0;
@@ -132,16 +133,16 @@ export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
       const exercise = exercises[source.dimension];
       const first = source.cases[0];
       return {
-        dimension: source.dimension, title: exercise.title,
+        dimension: source.dimension, title: w(exercise.title),
         direction: first ? `In ${first.recording} (${first.start}-${first.end}s), at ${first.cue}: ${first.direction}`
           : source.feedback.length
             ? `In ${source.feedback[0].recording} (${source.feedback[0].start}-${source.feedback[0].end}s), the feedback reports: ${source.feedback[0].observation} Replay this excerpt and locate the moment before choosing an adjustment; the saved review contains no exact direction.`
-            : 'The saved review contains no usable recording-specific direction for this area. Request a new evaluation before prescribing an exact change.',
+            : w('The saved review contains no usable recording-specific direction for this area. Request a new evaluation before prescribing an exact change.'),
         steps: first ? [
           `Replay ${first.recording} at ${first.cue}. Listen for: ${first.observation}`,
           `Re-record that same passage: ${first.direction}`,
         ] : [
-          'Replay the identified excerpt and confirm whether the reported trait is audible. Do not assume it occurs throughout the recording.',
+          w('Replay the identified excerpt and confirm whether the reported trait is audible. Do not assume it occurs throughout the recording.'),
           'For an exact cue and performance adjustment, run a new evaluation. Do not invent a line or a delivery problem from the rating alone.',
         ],
         check: first?.check ?? 'Identify a specific audible moment before asking for a different delivery.',
@@ -154,11 +155,11 @@ export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
       .slice(0, 2).map(d => exercises[d].keep) : [];
     const notes = ['Use these directions as rehearsal options for your next take. They come from existing feedback, not a new listening session. Keep only changes that make your delivery easier and more agreeable to listen to.'];
     if (job.rubric !== RUBRIC_VERSION)
-      notes.push('This feedback uses earlier evaluation criteria. Newer style or accent criteria have not been applied to this recording.');
+      notes.push(w('This feedback uses earlier evaluation criteria. Newer style or accent criteria have not been applied to this recording.'));
     if (job.status === 'running')
       notes.push('The listening review is still in progress. Treat this brief as provisional.');
     if (own.eligibleFiles < own.files)
-      notes.push('Only part of the recording set supports this brief. Check each suggested change by listening back; do not treat it as a finding about every line.');
+      notes.push(w('Only part of the recording set supports this brief. Check each suggested change by listening back; do not treat it as a finding about every line.'));
     const status = !enoughFeedback ? 'insufficient_feedback' : focus.length ? 'ready' : 'maintain';
     return {
       voice: own.voice, role: own.role, status,
@@ -171,7 +172,7 @@ export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
       ...(job.profile.target.trim() ? { deliveryTarget: job.profile.target.trim() } : {}),
       ...(job.profile.targetMarket?.trim() ? { targetMarket: job.profile.targetMarket.trim() } : {}),
       takePlan: [
-        'Take 1 - baseline: read the same passage in your normal delivery. Keep the words, recording position and playback level consistent.',
+        w('Take 1 - baseline: read the same passage in your normal delivery. Keep the words, recording position and playback level consistent.'),
         focus.length
           ? `Take 2 - ${focus[0].cases.length ? 'directed' : 'locate the cue'}: "${focus[0].title}". ${focus[0].direction}`
           : 'Take 2 - consistency: repeat the passage with the same intended vocal style. Do not invent a new performance choice just to sound different.',
@@ -184,7 +185,7 @@ export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
         'Keep the voice comfortable and believable; do not force extra emotion, volume or an accent change.',
         ...focus.map(item => item.check),
         focus.length
-          ? 'After listening back, keep one deliberate improvement and repeat it consistently in the next recording.'
+          ? w('After listening back, keep one deliberate improvement and repeat it consistently in the next recording.')
           : 'Keep the delivery consistent. Wait for clearer feedback before prescribing a specific change.',
       ],
       notes,
