@@ -149,9 +149,9 @@
 .test-action-menu [role=menuitem]:enabled:hover,.test-action-menu [role=menuitem]:focus-visible{background:var(--mica-hover)}
 .test-action-menu [role=menuitem]:focus-visible{outline:2px solid var(--mica-focus);outline-offset:-2px}
 .date-field{display:flex;flex-direction:column;gap:4px;min-width:0}
-.date-control{position:relative;min-width:0}
-.date-control input{padding-right:34px}
-.date-trigger{position:absolute;right:1px;top:1px;bottom:1px;width:32px;display:grid;place-items:center;padding:0;border-radius:6px;background:none;color:var(--mica-text)}
+.date-control{position:relative;display:flex;min-width:0}
+.date-control input{padding-right:44px}
+.date-control>.date-trigger{position:absolute;right:0;top:0;bottom:0;width:36px;display:grid;place-items:center;padding:0;border-radius:0 7px 7px 0;background:none;color:var(--mica-text)}
 .date-trigger:hover{background:var(--mica-selected)}
 .date-trigger:focus-visible{outline:2px solid var(--mica-focus);outline-offset:-3px}
 .date-field>.error-text{font-size:12px;margin:0}

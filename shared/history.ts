@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, testType, unassessedInputs, singleSpeakerFallbackCount, voiceGenders, type Job, type VoiceGender } from './domain.js';
+import { compareVoiceScores, evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, testType, unassessedInputs, singleSpeakerFallbackCount, voiceGenders, type Job, type VoiceGender } from './domain.js';
 import { csvCell } from './csv.js';
 
 export const testMetadataSchema = z.object({
@@ -50,14 +50,14 @@ export function testNameMetadata(name: string): Pick<TestHistory, 'languages' | 
 export function testHistory(job: Job): TestHistory {
   const summaries = summarize(job);
   const scored = summaries.filter(value => value.score !== null);
-  const bestScore = scored.length ? Math.max(...scored.map(value => value.score!)) : null;
+  const bestScore = scored[0]?.score ?? null;
   const voices = [...new Set(job.clips.map(clip => clip.voice))].sort();
   return {
     id: job.id, name: evaluationName(job), createdAt: job.createdAt, status: job.status,
     incomplete: job.status === 'completed' && unassessedInputs(job).length > 0,
     stage: job.profile.stage, clips: job.clips.length, voices, ...testNameMetadata(evaluationName(job)),
     bestScore,
-    bestVoices: scored.filter(value => bestScore !== null && Math.abs(value.score! - bestScore) < 1e-9)
+    bestVoices: scored.filter(value => compareVoiceScores(value, scored[0]) === 0)
       .map(value => ({ voice: value.voice, role: value.role })),
   };
 }
@@ -76,12 +76,10 @@ export function testTableCsv(jobs: Job[]): string {
       judgeColumns.set(key, `${judge.name} (${judge.deployment})${occurrence > 1 ? ` #${occurrence}` : ''}`);
       return [key, judge.id];
     }));
-    const voices = summarizeVoiceEvidence(job).sort((a, b) =>
-      a.score === null ? (b.score === null ? a.voice.localeCompare(b.voice) || a.role.localeCompare(b.role) : 1) :
-        b.score === null ? -1 : b.score - a.score || a.voice.localeCompare(b.voice) || a.role.localeCompare(b.role));
-    const bestScore = voices.find(voice => voice.score !== null)?.score ?? null;
+    const voices = summarizeVoiceEvidence(job);
+    const bestVoices = testHistory(job).bestVoices;
     const isBest = (voice: typeof voices[number]) =>
-      voice.score !== null && bestScore !== null && Math.abs(voice.score - bestScore) < 1e-9;
+      bestVoices.some(best => best.voice === voice.voice && best.role === voice.role);
     return { job, judges, best: voices.filter(isBest), other: voices.filter(voice => !isBest(voice)) };
   });
   const bestCount = Math.max(1, ...reports.map(report => report.best.length));

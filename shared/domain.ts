@@ -322,6 +322,15 @@ export type Summary = {
   dimensions: Record<Dimension, number | null>; disagreement: number | null; languages: string[];
   absentWindows: number;
 };
+export function compareVoiceScores(a: Pick<Summary, 'score' | 'dimensions'>, b: Pick<Summary, 'score' | 'dimensions'>): number {
+  if (a.score === null || b.score === null) return a.score === b.score ? 0 : a.score === null ? 1 : -1;
+  const overall = b.score - a.score;
+  if (Math.abs(overall) >= 1e-9) return overall;
+  const left = a.dimensions.naturalness, right = b.dimensions.naturalness;
+  if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1;
+  const naturalness = right - left;
+  return Math.abs(naturalness) < 1e-9 ? 0 : naturalness;
+}
 export function summarize(job: Job): Summary[] {
   const groups = new Map<string, StoredClip[]>();
   for (const c of job.clips) {
@@ -383,7 +392,7 @@ export function summarize(job: Job): Summary[] {
       dimensions: Object.fromEntries(dimensions.map(d => [d, mean(dimensionFiles[d])])) as Summary['dimensions'],
       disagreement: mean(spreads), languages: [...languages], absentWindows,
     };
-  }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+  }).sort((a, b) => compareVoiceScores(a, b) || a.voice.localeCompare(b.voice, 'en') || a.role.localeCompare(b.role, 'en'));
 }
 
 export function assessmentGaps(result: JudgeResult | undefined, profile: Profile, role: Clip['role']): string[] {

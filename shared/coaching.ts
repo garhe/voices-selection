@@ -1,5 +1,5 @@
 import {
-  activeDimensions, eligibleScore, evaluationName, summarize, summarizeVoiceEvidence, mediaText, RUBRIC_VERSION,
+  activeDimensions, compareVoiceScores, eligibleScore, evaluationName, summarize, summarizeVoiceEvidence, mediaText, RUBRIC_VERSION,
   type Assessment, type Dimension, type EvidenceNote, type Job, type StoredClip,
 } from './domain.js';
 
@@ -233,8 +233,7 @@ export type VoiceCoaching = {
 export function voiceCoaching(job: Job): VoiceCoaching[] {
   const summaries = summarize(job);
   return summaries.map(summary => {
-    const ranked = summaries.filter(s => s.role === summary.role && s.score !== null)
-      .sort((a, b) => b.score! - a.score! || a.voice.localeCompare(b.voice, 'en'));
+    const ranked = summaries.filter(s => s.role === summary.role && s.score !== null);
     const reference = ranked[0];
     const report: VoiceCoaching = {
       voice: summary.voice, role: summary.role, referenceVoice: reference?.voice ?? null,
@@ -246,8 +245,8 @@ export function voiceCoaching(job: Job): VoiceCoaching[] {
       report.warnings.push('These saved ratings use an earlier rubric, not the current voice-persona criteria. New practice suggestions do not re-evaluate old scores; start a new evaluation for the revised rubric.');
     if (job.status === 'running') report.warnings.push('Evaluation is still running; rankings and guidance are provisional.');
     if (!reference) return report;
-    if (ranked.filter(s => Math.abs(s.score! - reference.score!) < 1e-9).length > 1)
-      report.warnings.push('The highest overall score is tied. The reference is selected alphabetically, not declared a unique winner.');
+    if (ranked.filter(s => compareVoiceScores(s, reference) === 0).length > 1)
+      report.warnings.push('The highest overall score and naturalness are tied. The reference is selected alphabetically, not declared a unique winner.');
     if (summary.eligibleFiles < summary.files || reference.eligibleFiles < reference.files)
       report.warnings.push('Full-panel coverage is incomplete. Failed or unassessable recordings are excluded, and the overall ranking may change after reassessment.');
     report.warnings.push('Recording pairs use matching filenames, not verified scripts. Confirm equivalent content, speaker selection and language before treating gaps as delivery differences.');

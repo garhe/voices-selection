@@ -253,6 +253,13 @@ test('date filters render an accessible themed calendar instead of the browser n
   assert.match(html, />Today<\/button>/);
 });
 
+test('calendar triggers share their input bounds and reserve space for centered icons', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.date-control\{[^}]*display:flex/);
+  assert.match(css, /\.date-control input\{padding-right:44px\}/);
+  assert.match(css, /\.date-control>\.date-trigger\{[^}]*right:0;top:0;bottom:0;width:36px;[^}]*place-items:center/);
+});
+
 test('native dropdown theming is feature-detected and supports system high-contrast colors', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /@supports \(appearance: base-select\)/);
@@ -710,6 +717,29 @@ test('selected-test CSV separates names, overall scores and judge scores for tie
   assert.equal(single.rows[0]['Best voice name'], 'Only winner');
   assert.equal(single.rows[0]['Best voice overall score'], '5.00');
   assert.ok(single.headers.every(header => !header.startsWith('Other voice')));
+});
+
+test('history and selected CSVs choose higher naturalness for tied overall scores and retain true ties', () => {
+  const value = job([clip({ voice: 'Alpha' }), clip({ voice: 'Zulu' })], [4]);
+  value.results[0].assessment!.scores.naturalness = 3;
+  value.results[0].assessment!.scores.articulation = 5;
+  value.results[1].assessment!.scores.naturalness = 5;
+  value.results[1].assessment!.scores.articulation = 3;
+  const snapshot = JSON.stringify(value);
+  assert.deepEqual(testHistory(value).bestVoices, [{ voice: 'Zulu', role: 'speaker' }]);
+  const unique = csvTable(testTableCsv([value]));
+  assert.equal(unique.rows[0]['Best voice name'], 'Zulu');
+  assert.equal(unique.rows[0]['Best voice overall score'], '4.00');
+  assert.equal(unique.rows[0]['Other voice 1 name'], 'Alpha');
+  assert.equal(unique.rows[0]['Other voice 1 overall score'], '4.00');
+  assert.ok(!unique.headers.includes('Best voice 2 name'));
+  assert.equal(JSON.stringify(value), snapshot);
+  value.results[0].assessment!.scores.naturalness = 5;
+  value.results[0].assessment!.scores.articulation = 3;
+  assert.deepEqual(testHistory(value).bestVoices.map(voice => voice.voice), ['Alpha', 'Zulu']);
+  const tied = csvTable(testTableCsv([value]));
+  assert.equal(tied.rows[0]['Best voice 1 name'], 'Alpha');
+  assert.equal(tied.rows[0]['Best voice 2 name'], 'Zulu');
 });
 
 test('selected reports preserve per-judge duration-weighted regions and equal recording averages', () => {

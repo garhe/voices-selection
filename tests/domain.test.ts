@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { activeDimensions, eligibleScore, normalizeAssessment, summarize, summarizeVoiceEvidence, assessmentGaps, claimsMissingAudio, retryableAudioIssue, evaluationName, testNameSchema, resolveLanguageHint, profileSchema, RUBRIC_VERSION, DEFAULT_RUBRIC, rubricSchema, dimensionLabel } from '../shared/domain.js';
+import { activeDimensions, compareVoiceScores, eligibleScore, normalizeAssessment, summarize, summarizeVoiceEvidence, assessmentGaps, claimsMissingAudio, retryableAudioIssue, evaluationName, testNameSchema, resolveLanguageHint, profileSchema, RUBRIC_VERSION, DEFAULT_RUBRIC, rubricSchema, dimensionLabel } from '../shared/domain.js';
 import { measurements, wav } from '../server/audio.js';
 import { validateScope } from '../server/app.js';
 import { validateRegion } from '../src/audio.js';
@@ -552,6 +552,38 @@ test('regions are duration-weighted within recording and recordings are equal-we
   assert.equal(result.score, 3);
   assert.equal(result.files, 2);
   assert.equal(result.eligibleFiles, 2);
+});
+test('naturalness breaks overall ties consistently in summaries, evidence and coaching', () => {
+  const value = job([clip({ voice: 'Alpha' }), clip({ voice: 'Zulu' }), clip({ voice: 'Unassessed' })], [4]);
+  value.results[0].assessment!.scores.naturalness = 3;
+  value.results[0].assessment!.scores.articulation = 5;
+  value.results[1].assessment!.scores.naturalness = 5;
+  value.results[1].assessment!.scores.articulation = 3;
+  value.results[2].status = 'failed';
+  const snapshot = JSON.stringify(value);
+  const summaries = summarize(value);
+  assert.deepEqual(summaries.map(summary => summary.voice), ['Zulu', 'Alpha', 'Unassessed']);
+  assert.equal(summaries[0].score, summaries[1].score);
+  assert.equal(summaries[0].dimensions.naturalness, 5);
+  assert.equal(summaries[1].dimensions.naturalness, 3);
+  assert.deepEqual(summarizeVoiceEvidence(value).map(summary => summary.voice), ['Zulu', 'Alpha', 'Unassessed']);
+  assert.ok(voiceCoaching(value).every(report => report.referenceVoice === 'Zulu'));
+  assert.ok(voiceCoaching(value).every(report => !report.warnings.some(warning => warning.includes('tied'))));
+  assert.equal(JSON.stringify(value), snapshot);
+});
+test('ranking preserves full-precision overall differences, tolerates floating-point ties and handles missing naturalness', () => {
+  const base = summarize(job())[0];
+  const low = { ...base, score: 4, dimensions: { ...base.dimensions, naturalness: 3 } };
+  const high = { ...base, score: 4, dimensions: { ...base.dimensions, naturalness: 5 } };
+  assert.ok(compareVoiceScores(high, low) < 0);
+  assert.ok(compareVoiceScores({ ...low, score: 4 + 5e-10 }, high) > 0);
+  assert.ok(compareVoiceScores({ ...low, score: 4.001 }, high) < 0, 'Identical displayed scores are not necessarily tied.');
+  assert.equal(compareVoiceScores(high, { ...high, score: 4 + 5e-10 }), 0);
+  const missing = { ...high, dimensions: { ...high.dimensions, naturalness: null } };
+  assert.ok(compareVoiceScores(missing, low) > 0);
+  assert.equal(compareVoiceScores(missing, missing), 0);
+  assert.ok(compareVoiceScores({ ...high, score: null }, low) > 0);
+  assert.equal(compareVoiceScores({ ...high, score: null }, { ...low, score: null }), 0);
 });
 test('a failed or unassessable judge excludes a recording rather than silently changing panel', () => {
   const value = job();
