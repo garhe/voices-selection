@@ -8,8 +8,11 @@ export const sortingRequestSchema = z.object({
   paths: z.array(z.string().trim().min(1).max(2000)).min(1),
   mode: z.enum(['keep', 'replace']).default('keep'),
   outputDirectory: z.string().trim().max(2000).default(''),
-  nameFormat: z.string().trim().min(1).max(255).default('{name}_sorted'),
-}).strict();
+  nameFormat: z.string().trim().min(1).max(255).optional(),
+}).strict().transform(request => ({
+  ...request,
+  nameFormat: request.nameFormat ?? (request.mode === 'replace' ? '{name}' : '{name}_sorted'),
+}));
 export type SortingRequest = z.infer<typeof sortingRequestSchema>;
 export const sortingApplySchema = z.object({ token: z.string().uuid(), confirmed: z.literal(true) }).strict();
 export const sortingPlanSchema = z.object({

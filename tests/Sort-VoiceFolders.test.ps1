@@ -129,6 +129,75 @@ try {
     Assert-True ($repeat.ReplacedSource -and $repeat.WavFiles -eq 3 -and $repeat.RenamedFiles -eq 0) 'Repeated sorting changed the flat collection.'
     Assert-Rejected { & $scriptPath -SourcePath $replaceSource -OutputPath $replaceSource } 'non-overlapping'
 
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class VoiceSortDirectoryLock : IDisposable {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string path, uint access, uint share, IntPtr security,
+        uint disposition, uint flags, IntPtr template);
+    private readonly SafeFileHandle handle;
+    private readonly Timer timer;
+
+    public VoiceSortDirectoryLock(string path, int milliseconds) {
+        handle = CreateFile(path, 1, 3, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle.IsInvalid) {
+            int error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new Win32Exception(error);
+        }
+        timer = new Timer(_ => handle.Dispose(), null, milliseconds, Timeout.Infinite);
+    }
+    public void Dispose() {
+        timer.Dispose();
+        handle.Dispose();
+    }
+}
+'@
+    foreach ($scenario in @('source-lock', 'staging-lock', 'persistent-staging-lock')) {
+        Add-Fixture "$scenario\NonTTS\Voice\sample.wav" 'locked rename audio'
+        Add-Fixture "$scenario\notes.txt" 'original note'
+        $renameSource = Join-Path $testRoot $scenario
+        $script:renameLock = $null
+        $holdMilliseconds = 1200
+        if ($scenario -eq 'persistent-staging-lock') { $holdMilliseconds = -1 }
+        if ($scenario -eq 'source-lock') {
+            $script:renameLock = New-Object VoiceSortDirectoryLock($renameSource, $holdMilliseconds)
+        }
+        function Get-FileHash {
+            [CmdletBinding()]
+            param([string]$LiteralPath, [string]$Algorithm)
+            $hash = Microsoft.PowerShell.Utility\Get-FileHash @PSBoundParameters
+            if ($scenario -ne 'source-lock' -and $LiteralPath -like '*\.voice-sort-staged-*\*') {
+                $stagingDirectory = Split-Path (Split-Path $LiteralPath -Parent) -Parent
+                $script:renameLock = New-Object VoiceSortDirectoryLock($stagingDirectory, $holdMilliseconds)
+            }
+            $hash
+        }
+        $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            if ($scenario -eq 'persistent-staging-lock') {
+                Assert-Rejected { & $scriptPath -SourcePath $renameSource -Confirm:$false } 'after 6 attempts'
+                Assert-True (Test-Path -LiteralPath (Join-Path $renameSource 'NonTTS\Voice\sample.wav')) 'Persistent rename failure lost original audio.'
+                Assert-True (Test-Path -LiteralPath (Join-Path $renameSource 'notes.txt')) 'Persistent rename failure did not restore originals.'
+                Assert-True ($elapsed.ElapsedMilliseconds -ge 5000) 'Persistent lock did not exhaust the retry window.'
+            } else {
+                $retried = & $scriptPath -SourcePath $renameSource -Confirm:$false
+                Assert-True ($retried.ReplacedSource -and $retried.VerifiedFiles -eq 1) 'Temporary directory lock prevented replacement.'
+                Assert-True ([System.IO.File]::ReadAllText((Join-Path $renameSource 'Voice\sample.wav')) -eq 'locked rename audio') 'Retried replacement changed audio.'
+                Assert-True ($elapsed.ElapsedMilliseconds -ge 1000) 'Temporary lock did not exercise rename retries.'
+            }
+        } finally {
+            if ($script:renameLock) { $script:renameLock.Dispose() }
+            Remove-Item -LiteralPath Function:\Get-FileHash
+        }
+    }
+
     Add-Fixture 'copy-failure\NonTTS\Voice\locked.wav' 'locked original'
     Add-Fixture 'copy-failure\notes.txt' 'keep original note'
     $failureSource = Join-Path $testRoot 'copy-failure'

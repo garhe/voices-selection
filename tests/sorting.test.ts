@@ -34,19 +34,37 @@ async function collection(root: string, name: string) {
   return source;
 }
 
+test('sorting output defaults follow the selected mode and preserve explicit output options', () => {
+  const paths = ['D:\\Audio\\collection'];
+  assert.deepEqual(sortingRequestSchema.parse({ paths }), {
+    paths, mode: 'keep', outputDirectory: '', nameFormat: '{name}_sorted',
+  });
+  assert.deepEqual(sortingRequestSchema.parse({ paths, mode: 'replace' }), {
+    paths, mode: 'replace', outputDirectory: '', nameFormat: '{name}',
+  });
+  for (const mode of ['keep', 'replace']) {
+    const request = { paths, mode, outputDirectory: 'D:\\Exports', nameFormat: '{index}_{name}_clean' };
+    assert.deepEqual(sortingRequestSchema.parse(request), request);
+  }
+});
+
 test('folder sorting previews and replaces multiple collections with exact duplicate names and file bytes', { skip: process.platform !== 'win32' }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-sort-ui-'));
   try {
     const first = await collection(root, "first's collection");
     const second = await collection(root, 'collection-音声');
     const sorter = new FolderSorting(path.join(root, 'app-data'));
-    const preview = await sorter.plan({ paths: [first, second, path.join(root, 'missing')], mode: 'replace', nameFormat: '{name}' });
+    const preview = await sorter.plan({ paths: [first, second, path.join(root, 'missing')], mode: 'replace' });
     assert.equal(preview.entries.length, 3);
     assert.equal(preview.entries[0].plan?.wavFiles, 3);
     assert.equal(preview.entries[0].plan?.voiceFolders, 2);
     assert.equal(preview.entries[0].plan?.renamedFiles, 1);
     assert.equal(preview.entries[0].plan?.omittedFiles, 1);
     assert.equal(preview.entries[0].plan?.mappings.length, 3);
+    for (const [index, source] of [first, second].entries()) {
+      assert.equal(preview.entries[index].output, source);
+      assert.ok(preview.entries[index].plan!.mappings.every(mapping => mapping.destination.startsWith(source + path.sep)));
+    }
     assert.match(preview.entries[2].error!, /ENOENT/);
     assert.equal(await readFile(path.join(first, 'notes.txt'), 'utf8'), 'omitted file', 'Preview must not mutate originals.');
     assert.deepEqual((await readdir(first)).sort(), ['NonTTS', 'TTS', 'notes.txt']);
@@ -60,7 +78,8 @@ test('folder sorting previews and replaces multiple collections with exact dupli
       assert.deepEqual(contents.sort(), ['duplicate WAV', 'first WAV']);
       assert.equal(await readFile(path.join(source, 'Voice B', 'two.WAV'), 'utf8'), 'second voice');
     }
-    assert.ok((await readdir(root)).every(name => !name.startsWith('.voice-sort-')));
+    assert.deepEqual((await readdir(root)).sort(), [path.basename(first), path.basename(second)].sort(),
+      'In-place replacement must not leave sorted copies or randomly named staging/recovery folders.');
     await assert.rejects(sorter.apply({ token: preview.token, confirmed: true }), /missing or expired/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -148,7 +167,7 @@ test('replacement supports a new output location and name, and never overwrites 
     assert.match(rejected.entries[0].error!, /Output already exists/);
     assert.equal(await readFile(path.join(occupied, 'important.txt'), 'utf8'), 'do not overwrite');
     assert.equal(await readFile(path.join(other, 'notes.txt'), 'utf8'), 'omitted file');
-    const existing = await sorter.plan({ paths: [other], mode: 'keep', outputDirectory });
+    const existing = await sorter.plan({ paths: [other], mode: 'keep', outputDirectory, nameFormat: '{name}' });
     assert.match(existing.entries[0].error!, /Output already exists/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

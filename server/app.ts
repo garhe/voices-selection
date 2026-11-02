@@ -13,6 +13,7 @@ import { Store } from './store.js';
 import { Connection, type Credentials } from './credentials.js';
 import { testHistory, testMetadataSchema, canManageTest, type BulkTestResult } from '../shared/history.js';
 import { FolderSorting } from './sorting.js';
+import { BatchImport } from './batch.js';
 
 const uuid = z.string().uuid();
 const message = (error: unknown) => error instanceof Error ? error.message : 'Unexpected evaluation failure.';
@@ -155,6 +156,12 @@ export async function createApp(options: {
   });
   app.use(express.json({ limit: '9mb' }));
   const folderSorting = new FolderSorting(options.dataDir);
+  const batchImport = new BatchImport();
+  app.post('/api/batch/preview', async (req, res) => res.json(await batchImport.plan(req.body)));
+  app.get('/api/batch/:token/audio/:id', async (req, res) => {
+    const audio = await batchImport.audio(uuid.parse(req.params.token), uuid.parse(req.params.id));
+    res.type('application/octet-stream').send(audio);
+  });
   app.post('/api/folders/preview', async (req, res) => res.json(await folderSorting.plan(req.body)));
   app.post('/api/folders/apply', async (req, res) => res.json(await folderSorting.apply(req.body)));
   app.get('/api/config', async (_req, res) => res.json({

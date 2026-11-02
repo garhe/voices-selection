@@ -32,6 +32,30 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Move-CollectionDirectory {
+    param([string]$Source, [string]$Destination)
+
+    $delays = @(200, 400, 800, 1600, 2000)
+    for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
+        try {
+            [System.IO.Directory]::Move($Source, $Destination)
+            return
+        } catch {
+            $cause = $_.Exception.GetBaseException()
+            $windowsError = $cause.HResult -band 0xffff
+            if (-not (($cause -is [System.IO.IOException] -or
+                $cause -is [System.UnauthorizedAccessException]) -and $windowsError -in @(5, 32, 33))) {
+                throw
+            }
+            if ($attempt -eq $delays.Count) {
+                throw "Windows blocked renaming '$Source' to '$Destination' after $($attempt + 1) attempts. A persistent lock or permissions restriction may be responsible. Close applications using these folders or pause OneDrive syncing before retrying. Last error: $($cause.Message)"
+            }
+            Write-Verbose "Folder rename blocked; retrying in $($delays[$attempt]) ms: $Source"
+            Start-Sleep -Milliseconds $delays[$attempt]
+        }
+    }
+}
+
 function Assert-NoFileSystemLink {
     param([System.IO.FileSystemInfo]$Item)
 
@@ -205,14 +229,14 @@ try {
 if ($replaceSource) {
     $originalMoved = $false
     try {
-        [System.IO.Directory]::Move($source.FullName, $originalRoot)
+        Move-CollectionDirectory -Source $source.FullName -Destination $originalRoot
         $originalMoved = $true
-        [System.IO.Directory]::Move($copyRoot, $output)
+        Move-CollectionDirectory -Source $copyRoot -Destination $output
     } catch {
         $replacementError = $_.Exception.Message
         if ($originalMoved) {
             try {
-                [System.IO.Directory]::Move($originalRoot, $source.FullName)
+                Move-CollectionDirectory -Source $originalRoot -Destination $source.FullName
             } catch {
                 throw "Replacement failed: $replacementError. Automatic restore also failed: $($_.Exception.Message). Originals are retained at '$originalRoot'; verified sorted files are at '$copyRoot'. Do not delete either folder until recovered."
             }

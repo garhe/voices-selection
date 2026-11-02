@@ -36,16 +36,19 @@ export function FolderSorter({ busy, onAction, onPreview, onApply }: {
         onChange={event => { setPaths(event.target.value); invalidate(); }} /></label>
       <p className="hint">{selectedPaths.length} {selectedPaths.length === 1 ? 'directory' : 'directories'} entered. Paste one directory per line, with or without surrounding double quotes. Spaces in paths are preserved. Windows local server only. There is no folder-count limit. Enter individual collection folders, not their common parent. TTS/NonTTS grouping folders are removed; WAV files are flattened into voice folders. Duplicate filenames are renamed. Files are not uploaded or sent to Azure.</p>
       <div className="field-row">
-        <label>Original folders<select value={mode} disabled={busy} onChange={event => { setMode(event.target.value === 'replace' ? 'replace' : 'keep'); invalidate(); }}>
+        <label>Original folders<select value={mode} disabled={busy} onChange={event => {
+          const nextMode = event.target.value === 'replace' ? 'replace' : 'keep';
+          setMode(nextMode); setOutputDirectory(''); setNameFormat(nextMode === 'replace' ? '{name}' : '{name}_sorted'); invalidate();
+        }}>
           <option value="keep">Keep originals — create sorted copies</option>
           <option value="replace">Replace originals — permanently remove original contents</option>
         </select></label>
         <label>Output parent directory (optional)<input value={outputDirectory} disabled={busy} placeholder="Blank = each original folder's parent"
           onChange={event => { setOutputDirectory(event.target.value); invalidate(); }} /></label>
-        <label>Output folder name format<input value={nameFormat} disabled={busy} placeholder="{name}_sorted"
+        <label>Output folder name format<input value={nameFormat} disabled={busy} placeholder={mode === 'replace' ? '{name}' : '{name}_sorted'}
           onChange={event => { setNameFormat(event.target.value); invalidate(); }} /></label>
       </div>
-      <p className="hint">Output options apply to both modes. The output parent must already exist. Use {'{name}'} for the original collection name and {'{index}'} for its position in the list. Default: {'{name}_sorted'}. To replace in place, leave the parent blank and use {'{name}'}. Existing output folders are never overwritten.</p>
+      <p className="hint">Output options apply to both modes. Changing Original folders resets the output options: replacement keeps the original name and location; copies use {'{name}_sorted'}. You can then choose a different output parent or name. The output parent must already exist. Use {'{name}'} for the original collection name and {'{index}'} for its position in the list. Existing output folders are never overwritten except for the original folder during in-place replacement.</p>
       {mode === 'replace' ? <p className="error-text"><strong>Replacing originals is permanent.</strong> Sorted WAV copies are verified at the previewed output path before original contents are removed, including non-WAV files and empty folders. Keep a backup before continuing.</p>
         : <p className="hint">Original folders and all their contents remain unchanged. Non-WAV files and empty folders are omitted only from the sorted copies.</p>}
       <button className="secondary" disabled={busy || !selectedPaths.length || !nameFormat.trim()} onClick={() => void onAction('Previewing folder sorting', async () => {

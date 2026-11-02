@@ -3,7 +3,7 @@ import {
   type Dimension, type Job, type Profile, type Settings, type Summary, type ConnectionStatus, type ConnectionTest, type EvidenceNote, type VoiceEvidence, type DraftClip, type StoredClip, type TestQueueState,
   dimensions, dimensionLabel, dimensionWeight, profileRubric, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, retryableAudioIssue, unassessedInputs, mediaText, singleSpeakerFallbackCount, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, resolveLanguageHint, rolesForScope, testType,
 } from '../shared/domain';
-import { automaticRegions, base64, browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
+import { browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
 import { applyLanguageHint, displayLanguageHint, newTestProfile, evaluationBlockers, inputCount, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
 import { canManageTest, canRetryUnassessedTest, testHistory, testMetadataSchema, testNameMetadata, testStatusLabel, testTableCsv, TEST_PAGE_SIZE, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
@@ -19,6 +19,9 @@ import { droppedFiles, type ImportedFile } from './import';
 import { FolderSorter } from './FolderSorter';
 import { AudioPlayer } from './AudioPlayer';
 import type { SortingPreview, SortingResults } from '../shared/sorting';
+import type { BatchPreview, BatchTest } from '../shared/batch';
+import { BatchEvaluation } from './BatchEvaluation';
+import { prepareEvaluationClips } from './evaluation';
 
 type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string };
 type History = TestHistory;
@@ -303,6 +306,7 @@ function AzureConnection({ config, busy, onAction, onSaved }: {
 
 export function App() {
   const [tab, setTab] = useState<'setup' | 'results' | 'sorting'>('setup');
+  const [setupMode, setSetupMode] = useState<'single' | 'batch'>('single');
   const [evaluationOpen, setEvaluationOpen] = useState(true);
   const [panelOpen, setPanelOpen] = useState(true);
   const [recordingsOpen, setRecordingsOpen] = useState(true);
@@ -348,7 +352,7 @@ export function App() {
     const observer = new ResizeObserver(update);
     update(); observer.observe(bar);
     return () => { observer.disconnect(); workspace.style.removeProperty('--evaluation-actions-height'); };
-  }, [tab]);
+  }, [tab, setupMode]);
   const current = records.find(r => r.id === selected);
   const currentFile = current?.file;
   const included = records.filter(r => r.include);
@@ -498,25 +502,8 @@ export function App() {
     if (!config?.configured) throw new Error('Save your Azure endpoint and API key in the Azure connection settings first.');
     await api('/api/settings', { judges: config.judges }, 'PUT');
     const selectedClips = savedClips?.filter(c => c.include);
-    const clipIds: string[] = selectedClips?.map(c => c.id) ?? [];
-    for (let index = 0; index < included.length; index++) {
-      const recording = included[index];
-      setBusy(`Preparing ${index + 1}/${included.length}: ${recording.file.name}`);
-      const audio = await decode(recording.file);
-      const regions = profile.speakerMode === 'automatic' ? automaticRegions(audio.duration, profile.scope) : recording.regions;
-      if (clipIds.length + regions.length > 200) throw new Error('The complete recordings require more than 200 role/audio inputs. Include fewer files in this evaluation; no audio is silently truncated.');
-      for (const region of regions) {
-        const id = crypto.randomUUID();
-        await api('/api/clips', {
-          clip: {
-            id, voice: recording.voice, file: recording.path, role: region.role, start: region.start, end: region.end,
-            channel: region.channel, language: resolveLanguageHint(recording.language, profile.language),
-          },
-          pcm: base64(await toPcm(audio, region)),
-        });
-        clipIds.push(id);
-      }
-    }
+    const clipIds = await prepareEvaluationClips(included, profile,
+      async (clip, pcm) => { await api('/api/clips', { clip, pcm }); }, setBusy, selectedClips?.map(c => c.id));
     const value = await api<Job>('/api/jobs', {
       name, profile, clipIds, consent: true, enqueue, judges: config.judges,
       clipOverrides: selectedClips?.map(c => ({ id: c.id, voice: c.voice, language: resolveLanguageHint(c.language, profile.language) })),
@@ -530,12 +517,26 @@ export function App() {
     }
     await refresh();
   }
+  async function queueBatchTest(token: string, test: BatchTest, evaluation: Profile, judges: Settings['judges']) {
+    let clipIds: string[] = [];
+    for (const [index, source] of test.files.entries()) {
+      setBusy(`${test.name}: reading ${index + 1}/${test.files.length}`);
+      const response = await fetch(`/api/batch/${token}/audio/${source.id}`);
+      if (!response.ok) throw new Error(`Cannot read ${source.path}: ${await response.text()}`);
+      const file = new File([await response.blob()], source.path.split(/[\\/]/).pop()!);
+      clipIds = await prepareEvaluationClips([{
+        id: source.id, file, path: source.path, voice: source.voice, language: evaluation.language, regions: [], include: true,
+      }], evaluation, async (clip, pcm) => { await api('/api/clips', { clip, pcm }); },
+      message => setBusy(`${test.name} (${index + 1}/${test.files.length}): ${message}`), clipIds);
+    }
+    return api<Job>('/api/jobs', { name: test.name, profile: evaluation, judges, clipIds, consent: true, enqueue: true });
+  }
   async function reuseEvaluation(source: Job) {
     const draft = await api<{ job: Job; clips: StoredClip[]; missing: number }>(`/api/jobs/${source.id}/draft`);
     setTestName(evaluationName(draft.job)); setProfile(withRubric(withLanguageAccent({ ...draft.job.profile, singleSpeakerFallback: true }), profileRubric(draft.job.profile)));
     setConfig(previous => previous ? { ...previous, judges: sortJudges(draft.job.judges).map(j => ({ ...j })) } : previous);
     setRecords([]); setSelected(undefined); setSavedClips(draft.clips.map(c => ({ ...c, include: true })));
-    setDraftSource(evaluationName(draft.job)); setRecordingsOpen(true); setTab('setup');
+    setDraftSource(evaluationName(draft.job)); setRecordingsOpen(true); setSetupMode('single'); setTab('setup');
     setEditingTest(undefined);
     setNotice(draft.missing
       ? `${draft.missing} saved audio input(s) are missing. Only available audio was copied; re-import originals if needed.`
@@ -665,7 +666,7 @@ export function App() {
       </div>
       <div className="sidebar-foot"><span className={`dot ${config?.configured ? 'green' : ''}`} /> {config?.configured ? 'Azure credentials configured' : 'Azure setup required'}<small>Local-first · Audio-only assessment</small></div>
     </aside>
-    <main className={tab === 'setup' ? 'setup-workspace' : undefined}>
+    <main className={tab === 'setup' && setupMode === 'single' ? 'setup-workspace' : undefined}>
       <header className="topbar"><span>WORKSPACE <b>/</b> {tab === 'setup' ? 'New evaluation' : tab === 'sorting' ? 'Folder sorting' : showTestList ? 'Test Reports' : 'Test details'}</span><div className="topbar-actions"><ThemePicker /></div></header>
       {notice && <div className="notice" role="alert"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice('')}>×</button></div>}
       {(connectionError || progressError) && <div className="notice" role="status">{connectionError || progressError}</div>}
@@ -724,7 +725,16 @@ export function App() {
           <div><p className="eyebrow">LISTEN CLOSER. COMPARE FAIRLY.</p><h1>Find the right voice.</h1></div>
           <div className="hero-art" aria-hidden="true">{Array.from({ length: 23 }, (_, i) => <i key={i} style={{ height: `${18 + Math.sin(i * 1.7) ** 2 * 72}px` }} />)}</div>
         </section>
-        <section className="card test-identity">
+        <section className="card">
+          <div className="button-row" role="group" aria-label="Evaluation mode">
+            <button className={setupMode === 'single' ? 'primary' : 'secondary'} aria-pressed={setupMode === 'single'} disabled={!!busy} onClick={() => setSetupMode('single')}>Single evaluation</button>
+            <button className={setupMode === 'batch' ? 'primary' : 'secondary'} aria-pressed={setupMode === 'batch'} disabled={!!busy} onClick={() => {
+              setSetupMode('batch');
+              setEvaluationOpen(true); setPanelOpen(true);
+            }}>Batch evaluation</button>
+          </div>
+        </section>
+        {setupMode === 'single' && <section className="card test-identity">
           {draftSource && <p className="hint">Editable copy of {draftSource}. Starting creates a new evaluation; the original results stay unchanged.</p>}
           <label><span>Test name <span className="required-mark" aria-hidden="true">*</span></span><input required maxLength={120} value={testName} disabled={!!busy} onChange={e => {
             const name = e.target.value;
@@ -733,9 +743,9 @@ export function App() {
             setRecords(previous => applyLanguageHint(previous, next.language));
             setSavedClips(previous => previous === undefined ? undefined : applyLanguageHint(previous, next.language));
           }} placeholder="For example: ko-KR F VTS" /></label>
-        </section>
+        </section>}
         <div className="setup-grid" data-evaluation-open={evaluationOpen} data-panel-open={panelOpen}>
-          <details className="card setup-section" open={evaluationOpen} data-step="evaluation" onToggle={event => setEvaluationOpen(event.currentTarget.open)}><summary><span>01 · Choose your evaluation</span><small>{testType(profile.stage)} · {displayLanguageHint(profile.language)}</small></summary><div className="setup-section-content">
+          <details className="card setup-section" open={evaluationOpen} data-step="evaluation" onToggle={event => setEvaluationOpen(event.currentTarget.open)}><summary><span>01 · Choose your evaluation</span><small>{testType(profile.stage)} · {setupMode === 'batch' ? 'Per-folder locale' : displayLanguageHint(profile.language)}</small></summary><div className="setup-section-content">
             <div className="stage-options">
               <button className={`stage-card ${profile.stage === 'audition' ? 'chosen' : ''}`} onClick={() => setProfile({ ...profile, stage: 'audition' })}>
                 <strong>Voice Selection</strong><small>Audio quality: {dimensionWeight({ ...profile, stage: 'audition' }, 'audioQuality') > 0 ? 'included in score' : 'diagnostic only'}</small>
@@ -750,13 +760,13 @@ export function App() {
             }}>
               <option value="single">Single speaker</option><option value="agent">Agent only</option><option value="both">Both, scored separately</option>
               {profile.scope === 'customer' && <option value="customer" disabled>Customer only (saved test)</option>}
-            </select></label><label>Language / accent<input value={displayLanguageHint(profile.language)} maxLength={500} disabled={!!busy} onChange={e => updateLanguageAccent(e.target.value)} placeholder="Auto, British English, Italian for Italy..." /></label></div>
-            <p className="hint" role="status">Language / accent is filled from a single locale code in the test name. Changing the name or this field automatically applies the value to all files, including excluded inputs, replacing their listening overrides. New imports use the current value. Accent fit: {activeDimensions(profile).includes('accentFit') ? `on (weight ${dimensionWeight(profile, 'accentFit')})` : 'off (no accent target or excluded by rubric)'}</p>
-            <label className="speaker-mode">Speaker selection<select value={profile.speakerMode ?? 'manual'} disabled={!!busy || savedClips !== undefined} onChange={e => setProfile({ ...profile, speakerMode: e.target.value === 'manual' ? 'manual' : 'automatic' })}>
+            </select></label>{setupMode === 'single' && <label>Language / accent<input value={displayLanguageHint(profile.language)} maxLength={500} disabled={!!busy} onChange={e => updateLanguageAccent(e.target.value)} placeholder="Auto, British English, Italian for Italy..." /></label>}</div>
+            <p className="hint" role="status">{setupMode === 'batch' ? 'Each test uses the locale from its own folder name as its language/accent target. Missing or multiple locales use Auto; gender labels appear in the normal reports.' : <>Language / accent is filled from a single locale code in the test name. Changing the name or this field automatically applies the value to all files, including excluded inputs, replacing their listening overrides. New imports use the current value. Accent fit: {activeDimensions(profile).includes('accentFit') ? `on (weight ${dimensionWeight(profile, 'accentFit')})` : 'off (no accent target or excluded by rubric)'}</>}</p>
+            <label className="speaker-mode">Speaker selection<select value={setupMode === 'batch' ? 'automatic' : profile.speakerMode ?? 'manual'} disabled={!!busy || setupMode === 'batch' || savedClips !== undefined} onChange={e => setProfile({ ...profile, speakerMode: e.target.value === 'manual' ? 'manual' : 'automatic' })}>
               <option value="automatic">Automatic — infer roles from conversation content</option>
               <option value="manual">Advanced — manual speaker ranges / channels</option>
             </select></label>
-            <p className="hint">{profile.speakerMode === 'automatic'
+            <p className="hint">{setupMode === 'batch' || profile.speakerMode === 'automatic'
               ? `Roles are inferred automatically; unclear roles are flagged.${profile.singleSpeakerFallback && ['agent', 'both'].includes(profile.scope) ? ' If the agent is not identified, exactly one unambiguous assessable speaker may be scored as an explicit single-speaker fallback. Multiple or uncertain voices remain unassessable.' : ''}`
               : setupText('Confirm speaker ranges or channels for each recording.')}</p>
             <label><span>Target vocal style or test guide <span className="required-mark" aria-hidden="true">*</span></span><textarea required rows={2} maxLength={1500} value={profile.target} disabled={!!busy} aria-invalid={!profile.target.trim()} aria-describedby={!profile.target.trim() ? 'target-style-guidance' : undefined} onChange={e => setProfile({ ...profile, target: e.target.value })} placeholder="For example: warm, calm, conversational and effortless to listen to" /></label>
@@ -797,7 +807,9 @@ export function App() {
               })}>Save panel</button></div>
             <p className="hint">No fixed judge limit. Each added judge increases Azure usage and concurrent requests; deployment quotas still apply. Use actual deployment names, not display names. Related models can share biases; agreement is not a confidence guarantee.</p>
           </div></details>
-        <details className="card recordings-card setup-section" open={recordingsOpen} onToggle={event => {
+        {setupMode === 'batch' ? <BatchEvaluation profile={{ ...profile, speakerMode: 'automatic' }} config={config} busy={!!busy} onAction={action}
+          onPreview={directory => api<BatchPreview>('/api/batch/preview', { directory })}
+          onQueue={queueBatchTest} onRefresh={refresh} /> : <details className="card recordings-card setup-section" open={recordingsOpen} onToggle={event => {
           setRecordingsOpen(event.currentTarget.open);
           if (!event.currentTarget.open) event.currentTarget.querySelectorAll('audio').forEach(audio => audio.pause());
         }} ref={recordingsSection}
@@ -862,9 +874,9 @@ export function App() {
                   <label className="language-override">Recording language override<input value={displayLanguageHint(current.language)} maxLength={500} onChange={e => updateRecording(current.id, { language: e.target.value })} placeholder="Auto = use evaluation language/accent" /></label>
                 </>}</div></div></> : null}
           </div>
-        </details>
+        </details>}
         </div>
-        <section className="run-card"><div><h3>Ready for a closer listen?</h3><p>{profile.speakerMode === 'automatic' && included.some(r => r.duration === undefined) ? 'At least ' : ''}{plannedInputs} role/audio inputs × {config?.judges.length ?? 0} judges. {profile.scope === 'both' && 'Both roles use separate assessments of the same conversation. '}Azure usage is billed per your deployment; no cost estimate is available.</p>
+        {setupMode === 'single' && <><section className="run-card"><div><h3>Ready for a closer listen?</h3><p>{profile.speakerMode === 'automatic' && included.some(r => r.duration === undefined) ? 'At least ' : ''}{plannedInputs} role/audio inputs × {config?.judges.length ?? 0} judges. {profile.scope === 'both' && 'Both roles use separate assessments of the same conversation. '}Azure usage is billed per your deployment; no cost estimate is available.</p>
           <small>Automatic mode sends conversation windows; manual mode sends selected excerpts. Missing-audio claims, zero audio-token responses or exhausted format retries may trigger one fresh-session re-upload. Each session allows one format retry, within a total 180-second deadline. Retries incur additional Azure usage and never force scores. Audio inputs, names, ratings and results persist unencrypted on this computer. No transcript is requested or stored.</small>
           <div id="evaluation-readiness" className={`evaluation-readiness ${queueBlockers.length ? '' : 'ready'}`} role="status" aria-live="polite">
             {queueBlockers.length ? <><strong>Before you can start or queue</strong><ul>{queueBlockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul></> : <strong>Ready to start or add to queue.</strong>}
@@ -879,7 +891,7 @@ export function App() {
             <span role="status">{queueBlockers.length ? `${queueBlockers.length} setup requirement${queueBlockers.length === 1 ? '' : 's'} remaining` : `${plannedInputs} inputs · Ready to queue`}</span>
             <button className="text-button" onClick={() => document.getElementById('evaluation-readiness')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>Review readiness &amp; usage</button>
           <div className="run-actions"><button className="primary" disabled={queueBlockers.length > 0} aria-describedby="evaluation-readiness" onClick={() => void action('Preparing queued test', () => start(true))}>Add to queue</button>
-            <button className="secondary" disabled={startBlockers.length > 0} title={startBlockers.length ? startBlockers.join(' ') : 'Start the evaluation'} aria-describedby="evaluation-readiness" onClick={() => void action('Preparing evaluation', () => start())}>Start evaluation <span>→</span></button></div></div>
+            <button className="secondary" disabled={startBlockers.length > 0} title={startBlockers.length ? startBlockers.join(' ') : 'Start the evaluation'} aria-describedby="evaluation-readiness" onClick={() => void action('Preparing evaluation', () => start())}>Start evaluation <span>→</span></button></div></div></>}
         <p className="disclaimer">AI opinion scores are not validated MOS. This version does not include a dedicated MOS predictor, automatic diarization or a human listening panel.</p>
       </> : <>
         <div hidden={!showTestList}><TestLibrary entries={history} busy={!!busy} pageSize={testPageSize} onPageSizeChange={setTestPageSize} selectedIds={selectedTestIds} onSelectionChange={setSelectedTestIds}

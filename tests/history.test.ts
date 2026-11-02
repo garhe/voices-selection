@@ -16,7 +16,7 @@ import { RubricEditor } from '../src/RubricEditor.js';
 import { DEFAULT_RUBRIC, unassessedInputs } from '../shared/domain.js';
 import { FolderSorter } from '../src/FolderSorter.js';
 import { profile } from './fixtures.js';
-import { DEFAULT_THEME_COLOR, themeFamilies, themePalette, themePresets, validThemeColor } from '../src/theme.js';
+import { DEFAULT_THEME_COLOR, themeFamilies, themeMixes, themePalette, themePresets, themePreview, validThemeColor, validThemeSelection } from '../src/theme.js';
 import { AudioPlayer } from '../src/AudioPlayer.js';
 
 test('rubric editor exposes saved presets, seven editable dimensions, stage weights and single-speaker defaults', () => {
@@ -173,6 +173,125 @@ test('curated preset families have distinct muted shades ordered from mist to de
       assert.doesNotThrow(() => themePalette(preset.color));
     }
   }
+});
+
+test('eight painterly color mixes expose coordinated previews and multi-hue interface palettes', () => {
+  const html = renderToStaticMarkup(createElement(ThemePicker));
+  assert.deepEqual(themeMixes.map(preset => preset.name), ['Joy', 'Calm', 'Energy', 'Melancholy', 'Tenderness', 'Mystery', 'Freedom', 'Hope']);
+  assert.equal((html.match(/class="theme-mix"/g) ?? []).length, 8);
+  for (const preset of themeMixes) {
+    const selection = `mix:${preset.id}`;
+    assert.ok(html.includes(`aria-label="Use ${preset.name} color mix"`));
+    assert.equal(validThemeSelection(selection), true);
+    for (const color of preset.colors) {
+      assert.equal(validThemeColor(color), true);
+      assert.ok(themePreview(preset.colors).includes(color));
+    }
+    const palette = themePalette(selection);
+    const solid = themePalette(preset.colors[0]);
+    assert.equal(palette['--theme-accent'], solid['--theme-accent']);
+    for (const token of ['--theme-glow', '--theme-glow-soft', '--theme-panel-rgb', '--theme-selected', '--theme-header'])
+      assert.notEqual(palette[token], solid[token], `${preset.name} mixes colors in ${token}`);
+    const luminance = (value: string) => value.match(/\d+/g)!.map(Number).map(value => {
+      const channel = value / 255;
+      return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+    }).reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0);
+    assert.ok(1.05 / (luminance(palette['--theme-accent']) + .05) >= 4.5);
+    for (const surface of ['--theme-panel-rgb', '--theme-surface-rgb', '--theme-selected', '--theme-header'])
+      for (const text of ['--theme-text', '--theme-muted'])
+        assert.ok((luminance(palette[surface]) + .05) / (luminance(palette[text]) + .05) >= 4.5, `${preset.name}: ${text} on ${surface}`);
+    for (const token of ['--theme-card-wash', '--theme-panel-wash', '--theme-recordings-wash']) {
+      assert.notEqual(palette[token], solid[token]);
+      const stops = palette[token].match(/rgb\([^)]+\)/g)!;
+      assert.equal(stops.length, 2);
+      for (const stop of stops)
+        for (const text of ['--theme-text', '--theme-muted'])
+          assert.ok((luminance(stop) + .05) / (luminance(palette[text]) + .05) >= 4.5, `${preset.name}: ${text} on ${token}`);
+    }
+    assert.equal(new Set(['--theme-card-wash', '--theme-panel-wash', '--theme-recordings-wash'].map(token => palette[token])).size, 3);
+    for (const stop of palette['--theme-sidebar-wash'].match(/rgb\([^)]+\)/g)!)
+      assert.ok(1.05 / (luminance(stop) + .05) >= 7, `${preset.name}: light sidebar text on mixed colors`);
+    const hexRgb = (value: string) => `rgb(${[1, 3, 5].map(index => Number.parseInt(value.slice(index, index + 2), 16)).join(', ')})`;
+    const ranked = [...preset.colors].sort((a, b) => luminance(hexRgb(a)) - luminance(hexRgb(b)));
+    const sidebarStops = palette['--theme-sidebar-wash'].match(/rgb\(([^)]+)\)/g)!;
+    for (const [index, stop] of sidebarStops.entries()) {
+      const source = hexRgb(ranked[index]).match(/\d+/g)!.map(Number);
+      const shade = stop.match(/\d+/g)!.map(Number);
+      const ratios = shade.map((value, i) => value / source[i]);
+      assert.ok(Math.max(...ratios) - Math.min(...ratios) < .05, `${preset.name}: sidebar preserves its darkest paint hues`);
+      if (1.05 / (luminance(hexRgb(ranked[index])) + .05) >= 7)
+        assert.deepEqual(shade, source, `${preset.name}: already-dark paints stay undiluted`);
+    }
+    for (const token of ['--theme-sidebar-selected', '--theme-sidebar-hover']) {
+      const stops = palette[token].match(/rgb\([^)]+\)/g)!;
+      assert.equal(stops.length, preset.colors.length, `${preset.name}: every palette paint appears in the gradient`);
+      for (const stop of stops) {
+        assert.ok((luminance(stop) + .05) / (luminance(palette['--theme-sidebar-ink']) + .05) >= 4.5, `${preset.name}: dark highlight labels`);
+        assert.ok(luminance(stop) - luminance(sidebarStops[0]) >= .25, `${preset.name}: distinct light sidebar highlight`);
+        if (token === '--theme-sidebar-hover')
+          for (const text of ['--theme-text', '--theme-muted', '--theme-heading'])
+            assert.ok((luminance(stop) + .05) / (luminance(palette[text]) + .05) >= 4.5, `${preset.name}: ${text} on global hover gradient`);
+      }
+    }
+    for (const status of ['#14532d', '#294735', '#713f12', '#7f1d1d'])
+      for (const stop of palette['--theme-sidebar-hover'].match(/rgb\([^)]+\)/g)!)
+        assert.ok((luminance(stop) + .05) / (luminance(hexRgb(status)) + .05) >= 4.5, `${preset.name}: semantic status on highlighted history`);
+    const panel = palette['--theme-panel-wash'].match(/rgb\(([^)]+)\)/)![1].split(',').map(Number);
+    const solidPanel = solid['--theme-surface-rgb'].split(',').map(Number);
+    assert.ok(Math.hypot(...panel.map((value, index) => value - solidPanel[index])) >= 12, `${preset.name}: visibly different rendered panel tint`);
+  }
+  for (const invalid of ['mix:unknown', 'mix:', 'joy']) {
+    assert.equal(validThemeSelection(invalid), false);
+    assert.throws(() => themePalette(invalid), /six-digit hex color/);
+  }
+  assert.equal(validThemeSelection(DEFAULT_THEME_COLOR), true);
+});
+
+test('palette highlights use five subtle randomized color clouds instead of directional stripes', () => {
+  for (const preset of themeMixes) {
+    const first = themePalette(`mix:${preset.id}`, () => .1);
+    const second = themePalette(`mix:${preset.id}`, () => .9);
+    for (const token of ['--theme-sidebar-selected', '--theme-sidebar-hover']) {
+      assert.notEqual(first[token], second[token], `${preset.name}: randomized gradient`);
+      assert.equal((first[token].match(/radial-gradient\(/g) ?? []).length, preset.colors.length);
+      assert.doesNotMatch(first[token], /linear-gradient/);
+      assert.notDeepEqual(first[token].match(/ellipse [^,]+/g), second[token].match(/ellipse [^,]+/g));
+      assert.deepEqual(first[token].match(/rgb\([^)]+\)/g)!.sort(), second[token].match(/rgb\([^)]+\)/g)!.sort());
+      assert.equal(new Set(first[token].match(/rgb\([^)]+\)/g)).size, preset.colors.length);
+      assert.match(first[token], /, #f5f7f8$/);
+      for (const stop of first[token].match(/rgb\(([^)]+)\)/g)!)
+        assert.ok(stop.match(/\d+/g)!.map(Number).every(channel => channel >= 153), `${preset.name}: softly whitened color clouds`);
+    }
+  }
+});
+
+test('mixed color washes are wired to visible surfaces and cleared by single colors', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  for (const token of ['--theme-card-wash', '--theme-panel-wash', '--theme-recordings-wash', '--theme-sidebar-wash', '--theme-glow-third'])
+    assert.ok(css.includes(`var(${token})`), `${token} must be rendered`);
+  assert.match(css, /\.setup-grid > \[data-step=panel\] \{[^}]*var\(--theme-panel-wash\)/);
+  assert.match(css, /\.setup-grid > \.recordings-card \{[^}]*var\(--theme-recordings-wash\)/);
+  for (const color of [DEFAULT_THEME_COLOR, '#7fa7c5', '#ffffff'])
+    for (const token of ['--theme-card-wash', '--theme-panel-wash', '--theme-recordings-wash', '--theme-sidebar-wash'])
+      assert.equal(themePalette(color)[token], 'linear-gradient(transparent, transparent)');
+  assert.match(css, /@media \(forced-colors: none\) \{\s*:root\[data-theme-mix\]/);
+  for (const token of ['--theme-sidebar-selected', '--theme-sidebar-hover', '--theme-sidebar-ink', '--theme-sidebar-marker'])
+    assert.ok(css.includes(`var(${token})`), `${token} must be rendered`);
+  const picker = readFileSync(new URL('../src/ThemePicker.tsx', import.meta.url), 'utf8');
+  assert.match(picker, /else delete document\.documentElement\.dataset\.themeMix/);
+});
+
+test('palette hover gradients cover workspace controls, disclosures, rows and shared menus without changing single colors or danger states', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  const mixed = css.slice(css.indexOf('@media (forced-colors: none)'), css.indexOf('\n:is(.secondary, .text-button, .icon-button, .stage-card, .dropzone, .date-trigger', css.indexOf('@media (forced-colors: none)')));
+  assert.match(mixed, /--mica-hover: var\(--theme-sidebar-hover\)/);
+  assert.match(mixed, /--mica-hover-text: var\(--theme-sidebar-ink\)/);
+  assert.match(mixed, /\.test-table tbody tr:hover \{ background: var\(--mica-hover\); \}/);
+  for (const selector of ['button:not(.danger, .nav, .history-item):enabled', 'summary, a[href]', 'textarea:enabled:not([readonly]), select:enabled', '.file-row:is(:hover, :focus-within)'])
+    assert.ok(mixed.includes(selector), `${selector} uses mixed hover colors`);
+  assert.match(mixed, /:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-hover\);\s*color: var\(--mica-hover-text\)/);
+  assert.match(mixed, /button\.danger:enabled:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-danger\);\s*color: #ffffff/);
+  assert.match(css, /:is\(\.secondary, \.text-button\)\.danger:enabled:hover,[^}]*background: var\(--mica-danger\)/);
 });
 
 test('interface palettes reject invalid colors and retain white-label contrast across the color range', () => {
