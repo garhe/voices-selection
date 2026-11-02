@@ -108,30 +108,36 @@ export function themePalette(selection: string, random: () => number = Math.rand
       return shade;
     };
     const dark = sidebarShade(ranked[0]);
-    const darkSecondary = sidebarShade(ranked[1]);
     // Prefer a light colored paint over near-white ivory for a recognizable highlight.
     const highlight = [...ranked].reverse().find(color => Math.max(...color) - Math.min(...color) >= 30)!;
+    const colorClouds = (paints: Rgb[], vertical = false) => {
+      const colors = [...paints];
+      for (let index = colors.length - 1; index > 0; index--) {
+        const other = Math.floor(random() * (index + 1));
+        [colors[index], colors[other]] = [colors[other], colors[index]];
+      }
+      const clouds = colors.map((color, index) => {
+        const along = 3 + index * 20 + Math.floor(random() * 15);
+        const across = 5 + Math.floor(random() * 91);
+        const x = vertical ? across : along;
+        const y = vertical ? along : across;
+        const width = vertical ? 85 + Math.floor(random() * 76) : 40 + Math.floor(random() * 36);
+        const height = vertical ? 25 + Math.floor(random() * 21) : 75 + Math.floor(random() * 86);
+        return `radial-gradient(ellipse ${width}% ${height}% at ${x}% ${y}%, rgb(${rgb(color)}) 0%, transparent 100%)`;
+      });
+      return clouds.join(', ');
+    };
     const highlightGradient = (minimumLuminance: number) => {
       const colors = preset.colors.map(color => {
         let shade = mix(parseRgb(color), 255, .6);
         while (luminance(shade) < minimumLuminance) shade = mix(shade, 255, .06);
         return shade;
       });
-      for (let index = colors.length - 1; index > 0; index--) {
-        const other = Math.floor(random() * (index + 1));
-        [colors[index], colors[other]] = [colors[other], colors[index]];
-      }
-      const clouds = colors.map((color, index) => {
-        const x = 3 + index * 20 + Math.floor(random() * 15);
-        const y = 5 + Math.floor(random() * 91);
-        const width = 40 + Math.floor(random() * 36);
-        const height = 75 + Math.floor(random() * 86);
-        return `radial-gradient(ellipse ${width}% ${height}% at ${x}% ${y}%, rgb(${rgb(color)}) 0%, transparent 100%)`;
-      });
-      return `${clouds.join(', ')}, #f5f7f8`;
+      return `${colorClouds(colors)}, #f5f7f8`;
     };
+    const darkHex = '#' + dark.map(channel => channel.toString(16).padStart(2, '0')).join('');
     palette['--theme-sidebar-rgb'] = rgb(dark);
-    palette['--theme-sidebar-wash'] = `linear-gradient(160deg, rgb(${rgb(dark)}), rgb(${rgb(darkSecondary)}))`;
+    palette['--theme-sidebar-wash'] = `${colorClouds(preset.colors.map(color => sidebarShade(parseRgb(color))), true)}, linear-gradient(${darkHex}, ${darkHex})`;
     palette['--theme-sidebar-selected'] = highlightGradient(.6);
     palette['--theme-sidebar-hover'] = highlightGradient(.72);
     palette['--theme-sidebar-ink'] = `rgb(${rgb(mix(dark, 0, .5))})`;

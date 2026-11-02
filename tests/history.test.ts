@@ -214,14 +214,20 @@ test('eight painterly color mixes expose coordinated previews and multi-hue inte
     const hexRgb = (value: string) => `rgb(${[1, 3, 5].map(index => Number.parseInt(value.slice(index, index + 2), 16)).join(', ')})`;
     const ranked = [...preset.colors].sort((a, b) => luminance(hexRgb(a)) - luminance(hexRgb(b)));
     const sidebarStops = palette['--theme-sidebar-wash'].match(/rgb\(([^)]+)\)/g)!;
-    for (const [index, stop] of sidebarStops.entries()) {
-      const source = hexRgb(ranked[index]).match(/\d+/g)!.map(Number);
-      const shade = stop.match(/\d+/g)!.map(Number);
-      const ratios = shade.map((value, i) => value / source[i]);
-      assert.ok(Math.max(...ratios) - Math.min(...ratios) < .05, `${preset.name}: sidebar preserves its darkest paint hues`);
-      if (1.05 / (luminance(hexRgb(ranked[index])) + .05) >= 7)
-        assert.deepEqual(shade, source, `${preset.name}: already-dark paints stay undiluted`);
+    assert.equal(sidebarStops.length, preset.colors.length);
+    assert.equal((palette['--theme-sidebar-wash'].match(/radial-gradient/g) ?? []).length, preset.colors.length);
+    for (const color of ranked) {
+      const source = hexRgb(color).match(/\d+/g)!.map(Number);
+      assert.ok(sidebarStops.some(stop => {
+        const shade = stop.match(/\d+/g)!.map(Number);
+        const ratios = shade.map((value, i) => value / source[i]);
+        return Math.max(...ratios) - Math.min(...ratios) < .05;
+      }), `${preset.name}: sidebar includes the hue of ${color}`);
+      if (1.05 / (luminance(hexRgb(color)) + .05) >= 7)
+        assert.ok(sidebarStops.includes(hexRgb(color)), `${preset.name}: already-dark paints stay undiluted`);
     }
+    const shades = sidebarStops.map(stop => stop.match(/\d+/g)!.map(Number));
+    assert.ok(shades.some(a => shades.some(b => Math.hypot(...a.map((value, i) => value - b[i])) >= 20)), `${preset.name}: sidebar colors are visibly distinct`);
     for (const token of ['--theme-sidebar-selected', '--theme-sidebar-hover']) {
       const stops = palette[token].match(/rgb\([^)]+\)/g)!;
       assert.equal(stops.length, preset.colors.length, `${preset.name}: every palette paint appears in the gradient`);
@@ -245,6 +251,19 @@ test('eight painterly color mixes expose coordinated previews and multi-hue inte
     assert.throws(() => themePalette(invalid), /six-digit hex color/);
   }
   assert.equal(validThemeSelection(DEFAULT_THEME_COLOR), true);
+});
+
+test('sidebar backgrounds randomize five vertically distributed dark palette clouds', () => {
+  for (const preset of themeMixes) {
+    const first = themePalette(`mix:${preset.id}`, () => .1)['--theme-sidebar-wash'];
+    const second = themePalette(`mix:${preset.id}`, () => .9)['--theme-sidebar-wash'];
+    assert.notEqual(first, second);
+    assert.deepEqual(first.match(/rgb\([^)]+\)/g)!.sort(), second.match(/rgb\([^)]+\)/g)!.sort());
+    const positions = [...first.matchAll(/at (\d+)% (\d+)%/g)].map(match => Number(match[2]));
+    assert.equal(positions.length, 5);
+    assert.ok(Math.max(...positions) - Math.min(...positions) >= 80, `${preset.name}: colors span the sidebar height`);
+    assert.match(first, /linear-gradient\(#[0-9a-f]{6}, #[0-9a-f]{6}\)$/);
+  }
 });
 
 test('palette highlights use five subtle randomized color clouds instead of directional stripes', () => {
