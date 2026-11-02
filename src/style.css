@@ -639,12 +639,15 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
 .history-item:enabled:hover { background: #ffffff14; box-shadow: inset 2px 0 0 #ffffff66; }
 @media (forced-colors: none) {
   :root[data-theme-mix] {
-    --mica-hover: var(--theme-sidebar-hover);
-    --mica-hover-text: var(--theme-sidebar-ink);
+    --mica-hover: var(--theme-workspace-hover);
+    --mica-hover-text: #ffffff;
+  }
+  :root summary:is(:hover, :focus-visible), :root summary:is(:hover, :focus-visible) :is(span, strong, small) {
+    color: var(--theme-accent-hover);
   }
   :root[data-theme-mix] :is(
     button:not(.danger, .nav, .history-item):enabled,
-    summary, a[href],
+    a[href],
     input:not([type=checkbox], [type=radio], [type=color]):enabled:not([readonly]),
     textarea:enabled:not([readonly]), select:enabled
   ):is(:hover, :focus-visible) {
@@ -652,7 +655,10 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     color: var(--mica-hover-text);
   }
   :root[data-theme-mix] .stage-card:enabled:is(:hover, :focus-visible) :is(strong, small, span) { color: inherit; }
-  :root[data-theme-mix] summary:is(:hover, :focus-visible) :is(strong, small, span) { color: inherit; }
+  :root[data-theme-mix] :is(input, textarea):enabled:not([readonly]):is(:hover, :focus-visible)::placeholder {
+    color: var(--mica-hover-text);
+    opacity: 1;
+  }
   :root[data-theme-mix] button.danger:enabled:is(:hover, :focus-visible) {
     background: var(--mica-danger);
     color: #ffffff;
@@ -661,8 +667,15 @@ input[type=checkbox] { accent-color: var(--theme-accent); }
     background: var(--mica-hover);
     color: var(--mica-hover-text);
   }
+  :root[data-theme-mix] .file-row:is(:hover, :focus-within) button:not(.danger),
   :root[data-theme-mix] .file-row:is(:hover, :focus-within) button > span { color: inherit; }
-  :root[data-theme-mix] .test-table tbody tr:hover { background: var(--mica-hover); }
+  :root[data-theme-mix] .test-table tbody tr:hover {
+    --mica-text: var(--mica-hover-text);
+    --mica-muted: var(--mica-hover-text);
+    --theme-heading: var(--mica-hover-text);
+    background: var(--mica-hover);
+    color: var(--mica-hover-text);
+  }
   :root[data-theme-mix] .nav.active {
     background: var(--theme-sidebar-selected);
     color: var(--theme-sidebar-ink);

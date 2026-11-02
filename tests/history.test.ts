@@ -198,14 +198,14 @@ test('eight painterly color mixes expose coordinated previews and multi-hue inte
     }).reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0);
     assert.ok(1.05 / (luminance(palette['--theme-accent']) + .05) >= 4.5);
     for (const surface of ['--theme-panel-rgb', '--theme-surface-rgb', '--theme-selected', '--theme-header'])
-      for (const text of ['--theme-text', '--theme-muted'])
+      for (const text of ['--theme-text', '--theme-muted', '--theme-accent-hover'])
         assert.ok((luminance(palette[surface]) + .05) / (luminance(palette[text]) + .05) >= 4.5, `${preset.name}: ${text} on ${surface}`);
     for (const token of ['--theme-card-wash', '--theme-panel-wash', '--theme-recordings-wash']) {
       assert.notEqual(palette[token], solid[token]);
       const stops = palette[token].match(/rgb\([^)]+\)/g)!;
       assert.equal(stops.length, 2);
       for (const stop of stops)
-        for (const text of ['--theme-text', '--theme-muted'])
+        for (const text of ['--theme-text', '--theme-muted', '--theme-accent-hover'])
           assert.ok((luminance(stop) + .05) / (luminance(palette[text]) + .05) >= 4.5, `${preset.name}: ${text} on ${token}`);
     }
     assert.equal(new Set(['--theme-card-wash', '--theme-panel-wash', '--theme-recordings-wash'].map(token => palette[token])).size, 3);
@@ -242,6 +242,16 @@ test('eight painterly color mixes expose coordinated previews and multi-hue inte
     for (const status of ['#14532d', '#294735', '#713f12', '#7f1d1d'])
       for (const stop of palette['--theme-sidebar-hover'].match(/rgb\([^)]+\)/g)!)
         assert.ok((luminance(stop) + .05) / (luminance(hexRgb(status)) + .05) >= 4.5, `${preset.name}: semantic status on highlighted history`);
+    const workspace = palette['--theme-workspace-hover'].match(/rgb\([^)]+\)/g)!;
+    assert.equal(workspace.length, preset.colors.length);
+    assert.equal((palette['--theme-workspace-hover'].match(/radial-gradient/g) ?? []).length, preset.colors.length);
+    for (const stop of workspace) {
+      assert.ok(1.05 / (luminance(stop) + .05) >= 4.5, `${preset.name}: white workspace hover labels are readable on every paint`);
+    }
+    const workspaceBase = palette['--theme-workspace-hover'].match(/(#[0-9a-f]{6})$/)![1];
+    assert.ok(1.05 / (luminance(hexRgb(workspaceBase)) + .05) >= 4.5, `${preset.name}: white labels remain readable between clouds`);
+    const sidebarHover = palette['--theme-sidebar-hover'].match(/rgb\([^)]+\)/g)!;
+    assert.ok(Math.max(...workspace.map(luminance)) <= Math.min(...sidebarHover.map(luminance)) - .15, `${preset.name}: workspace hover is darker than sidebar hover`);
     const panel = palette['--theme-panel-wash'].match(/rgb\(([^)]+)\)/)![1].split(',').map(Number);
     const solidPanel = solid['--theme-surface-rgb'].split(',').map(Number);
     assert.ok(Math.hypot(...panel.map((value, index) => value - solidPanel[index])) >= 12, `${preset.name}: visibly different rendered panel tint`);
@@ -300,17 +310,32 @@ test('mixed color washes are wired to visible surfaces and cleared by single col
   assert.match(picker, /else delete document\.documentElement\.dataset\.themeMix/);
 });
 
-test('palette hover gradients cover workspace controls, disclosures, rows and shared menus without changing single colors or danger states', () => {
+test('palette hover gradients cover workspace controls, rows and shared menus without changing single colors or danger states', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   const mixed = css.slice(css.indexOf('@media (forced-colors: none)'), css.indexOf('\n:is(.secondary, .text-button, .icon-button, .stage-card, .dropzone, .date-trigger', css.indexOf('@media (forced-colors: none)')));
-  assert.match(mixed, /--mica-hover: var\(--theme-sidebar-hover\)/);
-  assert.match(mixed, /--mica-hover-text: var\(--theme-sidebar-ink\)/);
-  assert.match(mixed, /\.test-table tbody tr:hover \{ background: var\(--mica-hover\); \}/);
-  for (const selector of ['button:not(.danger, .nav, .history-item):enabled', 'summary, a[href]', 'textarea:enabled:not([readonly]), select:enabled', '.file-row:is(:hover, :focus-within)'])
+  assert.match(mixed, /--mica-hover: var\(--theme-workspace-hover\)/);
+  assert.match(mixed, /--mica-hover-text: #ffffff/);
+  assert.match(mixed, /:is\(\.nav, \.history-item\):enabled:is\(:hover, :focus-visible\) \{[^}]*color: var\(--theme-sidebar-ink\)/);
+  assert.match(mixed, /\.test-table tbody tr:hover \{[^}]*--mica-text: var\(--mica-hover-text\);[^}]*--theme-heading: var\(--mica-hover-text\);[^}]*background: var\(--mica-hover\);/);
+  assert.match(mixed, /::placeholder \{\s*color: var\(--mica-hover-text\);\s*opacity: 1/);
+  for (const selector of ['button:not(.danger, .nav, .history-item):enabled', 'a[href]', 'textarea:enabled:not([readonly]), select:enabled', '.file-row:is(:hover, :focus-within)'])
     assert.ok(mixed.includes(selector), `${selector} uses mixed hover colors`);
   assert.match(mixed, /:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-hover\);\s*color: var\(--mica-hover-text\)/);
   assert.match(mixed, /button\.danger:enabled:is\(:hover, :focus-visible\) \{\s*background: var\(--mica-danger\);\s*color: #ffffff/);
   assert.match(css, /:is\(\.secondary, \.text-button\)\.danger:enabled:hover,[^}]*background: var\(--mica-danger\)/);
+  const gradientControls = mixed.match(/:root\[data-theme-mix\] :is\(([\s\S]+?)\):is\(:hover, :focus-visible\)/)?.[1];
+  assert.ok(gradientControls);
+  assert.doesNotMatch(gradientControls, /\bsummary\b/);
+});
+
+test('disclosure headings change text color on hover and keyboard focus without an underline or full-width fill', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  const hover = css.match(/:root summary:is\(:hover, :focus-visible\), :root summary:is\(:hover, :focus-visible\) :is\(span, strong, small\) \{([^}]+)\}/)?.[1];
+  assert.ok(hover);
+  assert.match(hover, /color: var\(--theme-accent-hover\)/);
+  assert.doesNotMatch(hover, /text-decoration|background|box-shadow|outline/);
+  assert.match(css, /summary \{[^}]*background: none; box-shadow: none;/);
+  assert.match(css, /summary:focus-visible[^}]*outline-color: var\(--mica-focus\)/);
 });
 
 test('interface palettes reject invalid colors and retain white-label contrast across the color range', () => {

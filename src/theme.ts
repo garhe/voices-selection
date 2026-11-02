@@ -54,16 +54,21 @@ function luminance(color: Rgb): number {
   return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
 }
 
+function whiteTextBackground(color: Rgb, minimumContrast = 4.5): Rgb {
+  let shade = color;
+  while (1.05 / (luminance(shade) + .05) < minimumContrast) shade = mix(shade, 0, .06);
+  return shade;
+}
+
 export function themePalette(selection: string, random: () => number = Math.random): Record<string, string> {
   const preset = themeMix(selection);
   const color = preset?.colors[0] ?? selection;
   if (!validThemeColor(color)) throw new Error('Interface color must be a six-digit hex color, such as #146b58.');
   const base = parseRgb(color);
-  let accent = base;
-  // White button labels must remain readable even for very pale custom colors.
-  while (1.05 / (luminance(accent) + .05) < 4.5) accent = mix(accent, 0, .06);
+  const accent = whiteTextBackground(base);
   const glass = mix(base, 255, .55);
   const rgb = (value: Rgb) => value.join(', ');
+  const hex = (value: Rgb) => '#' + value.map(channel => channel.toString(16).padStart(2, '0')).join('');
   const palette: Record<string, string> = {
     '--theme-color': color.toLowerCase(),
     '--theme-accent': `rgb(${rgb(accent)})`,
@@ -84,6 +89,7 @@ export function themePalette(selection: string, random: () => number = Math.rand
     '--theme-sidebar-hover': '#ffffff40',
     '--theme-sidebar-ink': '#ffffff',
     '--theme-sidebar-marker': '#ffffff',
+    '--theme-workspace-hover': `rgb(${rgb(accent)})`,
     '--theme-surface-rgb': rgb(mix(base, 255, .96)),
     '--theme-glass-rgb': rgb([Math.max(200, glass[0]), Math.max(200, glass[1]), Math.max(200, glass[2])]),
     '--theme-panel-rgb': rgb(mix(base, 255, .87)),
@@ -102,12 +108,7 @@ export function themePalette(selection: string, random: () => number = Math.rand
     palette['--theme-panel-wash'] = `linear-gradient(135deg, ${paint(1, .62)}, ${paint(2, .78)})`;
     palette['--theme-recordings-wash'] = `linear-gradient(125deg, ${paint(2, .64)}, ${paint(3, .8)})`;
     const ranked = preset.colors.map(parseRgb).sort((a, b) => luminance(a) - luminance(b));
-    const sidebarShade = (color: Rgb) => {
-      let shade = color;
-      while (1.05 / (luminance(shade) + .05) < 7) shade = mix(shade, 0, .06);
-      return shade;
-    };
-    const dark = sidebarShade(ranked[0]);
+    const dark = whiteTextBackground(ranked[0], 7);
     // Prefer a light colored paint over near-white ivory for a recognizable highlight.
     const highlight = [...ranked].reverse().find(color => Math.max(...color) - Math.min(...color) >= 30)!;
     const colorClouds = (paints: Rgb[], vertical = false) => {
@@ -135,11 +136,13 @@ export function themePalette(selection: string, random: () => number = Math.rand
       });
       return `${colorClouds(colors)}, #f5f7f8`;
     };
-    const darkHex = '#' + dark.map(channel => channel.toString(16).padStart(2, '0')).join('');
+    const darkHex = hex(dark);
     palette['--theme-sidebar-rgb'] = rgb(dark);
-    palette['--theme-sidebar-wash'] = `${colorClouds(preset.colors.map(color => sidebarShade(parseRgb(color))), true)}, linear-gradient(${darkHex}, ${darkHex})`;
+    palette['--theme-sidebar-wash'] = `${colorClouds(preset.colors.map(color => whiteTextBackground(parseRgb(color), 7)), true)}, linear-gradient(${darkHex}, ${darkHex})`;
     palette['--theme-sidebar-selected'] = highlightGradient(.6);
     palette['--theme-sidebar-hover'] = highlightGradient(.72);
+    const workspaceColors = preset.colors.map(color => whiteTextBackground(parseRgb(color)));
+    palette['--theme-workspace-hover'] = `${colorClouds(workspaceColors)}, ${hex(accent)}`;
     palette['--theme-sidebar-ink'] = `rgb(${rgb(mix(dark, 0, .5))})`;
     palette['--theme-sidebar-marker'] = `rgb(${rgb(highlight)})`;
     palette['--theme-page'] = paint(3, .72);
