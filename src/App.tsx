@@ -808,7 +808,7 @@ export function App() {
             <p className="hint">No fixed judge limit. Each added judge increases Azure usage and concurrent requests; deployment quotas still apply. Use actual deployment names, not display names. Related models can share biases; agreement is not a confidence guarantee.</p>
           </div></details>
         {setupMode === 'batch' ? <BatchEvaluation profile={{ ...profile, speakerMode: 'automatic' }} config={config} busy={!!busy} onAction={action}
-          onPreview={directory => api<BatchPreview>('/api/batch/preview', { directory })}
+          onPreview={request => api<BatchPreview>('/api/batch/preview', request)}
           onQueue={queueBatchTest} onRefresh={refresh} /> : <details className="card recordings-card setup-section" open={recordingsOpen} onToggle={event => {
           setRecordingsOpen(event.currentTarget.open);
           if (!event.currentTarget.open) event.currentTarget.querySelectorAll('audio').forEach(audio => audio.pause());

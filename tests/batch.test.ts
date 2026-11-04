@@ -15,7 +15,8 @@ import { batchTestProfile, submitBatch, type BatchSubmission } from '../src/batc
 import { prepareEvaluationClips } from '../src/evaluation.js';
 import { newTestProfile } from '../src/readiness.js';
 import { MAX_SECONDS, DEFAULT_RUBRIC, type Job, type Clip, type TestQueueState } from '../shared/domain.js';
-import type { BatchPreview, BatchTest } from '../shared/batch.js';
+import { batchDirectorySchema, type BatchPreview, type BatchTest } from '../shared/batch.js';
+import { parseSortingPaths as parseFolderPaths } from '../shared/sorting.js';
 import type { TestHistory } from '../shared/history.js';
 import { assessment } from './fixtures.js';
 
@@ -82,6 +83,63 @@ test('invalid layouts, empty tests, limits, and links fail explicitly', async ()
     await symlink(path.join(root, 'invalid'), path.join(root, 'linked'), 'junction');
     await assert.rejects(importer.plan({ directory: root }), /links or junctions/);
     await assert.rejects(importer.plan({ directory: path.join(root, 'linked') }), /links or junctions/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('batch folder lists accept quoted paths and preserve spaces across different parents', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-batch-list-'));
+  try {
+    const first = path.join(root, 'Work Folder', 'es-ES_M_039_01_revised_MatchFile');
+    const second = path.join(root, 'Other Folder', 'pt-BR Female VTS');
+    await audioFile(first, 'Voice A/nested/one.wav', Buffer.from('first'));
+    await audioFile(second, 'Voice B/two.mp3', Buffer.from('second'));
+    await audioFile(second, 'Voice B/readme.txt');
+    await audioFile(root, 'Work Folder/unselected/Voice/three.wav');
+    const directories = parseFolderPaths(`"${first}"\r\n\n  "${second}"  \r\n"${first}"`);
+    const importer = new BatchImport();
+    const preview = await importer.plan({ directories });
+    assert.ok('directories' in preview);
+    assert.deepEqual(preview.directories, [first, second]);
+    assert.deepEqual(preview.tests.map(test => [test.name, test.languages, test.genders, test.errors]), [
+      [path.basename(first), ['es-ES'], ['Male'], []],
+      [path.basename(second), ['pt-BR'], ['Female'], []],
+    ]);
+    assert.equal(preview.ignoredFiles, 1);
+    assert.equal(preview.tests[0].files[0].path, path.join(path.basename(first), 'Voice A', 'nested', 'one.wav'));
+    assert.deepEqual(await importer.audio(preview.token, preview.tests[0].files[0].id), Buffer.from('first'));
+    assert.deepEqual(await importer.audio(preview.token, preview.tests[1].files[0].id), Buffer.from('second'));
+    const quoted = await importer.plan({ directories: [`"${second}"`] });
+    assert.deepEqual(quoted.tests.map(test => test.name), [path.basename(second)]);
+    await assert.rejects(importer.audio(preview.token, preview.tests[0].files[0].id), /expired/);
+    await writeFile(path.join(second, 'Voice B', 'two.mp3'), 'changed contents');
+    await assert.rejects(importer.audio(quoted.token, quoted.tests[0].files[0].id), /changed after preview/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('batch folder lists reject invalid sources and duplicate test names explicitly', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-batch-list-invalid-'));
+  const importer = new BatchImport();
+  try {
+    for (const input of [{ directories: [] }, { directories: ['""'] }, { directory: root, directories: [root] }])
+      assert.equal(batchDirectorySchema.safeParse(input).success, false);
+    await assert.rejects(importer.plan({ directories: [root, 'relative'] }), /absolute/);
+    await assert.rejects(importer.plan({ directories: [path.parse(root).root] }), /drive root/);
+    await assert.rejects(importer.plan({ directories: [path.join(root, 'missing')] }), /ENOENT/);
+    const file = await audioFile(root, 'not-a-folder.txt');
+    await assert.rejects(importer.plan({ directories: [file] }), /real files and directories/);
+    const empty = path.join(root, 'empty');
+    await mkdir(empty);
+    assert.match((await importer.plan({ directories: [empty] })).tests[0].errors.join(' '), /No supported audio/);
+    await audioFile(empty, 'direct.wav');
+    assert.match((await importer.plan({ directories: [empty] })).tests[0].errors.join(' '), /voice subfolder/);
+    const first = path.join(root, 'one', 'en-US_F');
+    const second = path.join(root, 'two', 'en-US_F');
+    await audioFile(first, 'Voice/one.wav');
+    await audioFile(second, 'Voice/two.wav');
+    await assert.rejects(importer.plan({ directories: [first, second] }), /names must be unique.*en-US_F/);
+    const linked = path.join(root, 'linked');
+    await symlink(first, linked, 'junction');
+    await assert.rejects(importer.plan({ directories: [linked] }), /links or junctions/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -224,7 +282,11 @@ test('local batch audio goes through normal saved jobs, FIFO queue and report hi
   };
   try {
     await post('/api/queue/pause', {});
-    const preview = await post<BatchPreview>('/api/batch/preview', { directory: collection });
+    const parentPreview = await post<BatchPreview>('/api/batch/preview', { directory: collection });
+    const preview = await post<BatchPreview>('/api/batch/preview', {
+      directories: [path.join(collection, 'en-US_F'), `"${path.join(collection, 'fr-FR_M')}"`],
+    });
+    assert.deepEqual(preview.tests.map(test => test.name), parentPreview.tests.map(test => test.name));
     const ids: string[] = [];
     await submitBatch(preview.tests, newTestProfile(), judges, async (test, profile, panel) => {
       const clips: string[] = [];

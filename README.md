@@ -296,7 +296,13 @@ TTS setup and report labels use **audio** terminology, including **Bring your au
 In **Evaluation setup**, choose **Batch evaluation**:
 
 1. Choose the shared evaluation type, who should be scored, rubric, test guide and judging panel. Batch evaluation uses **automatic speaker selection** for complete audio files.
-2. Select **Continue to batch directory**, paste an absolute local parent-directory path (Windows **Copy as path** quotes are accepted), then select **Preview batch**. The path refers to the computer running the app.
+2. Select **Continue to batch directory**, then choose a **Batch source**:
+   - **Parent directory** (default): paste an absolute local parent-directory path to discover all its test folders.
+   - **Test folder list**: paste one absolute test-folder path per line, including folders from different parents. Each listed folder becomes one test and must contain voice subfolders. Blank lines are ignored, spaces are preserved, and repeated paths are evaluated once. Test folder names must be unique within the batch.
+
+   Windows **Copy as path** double quotes are accepted in either mode. Paths refer to the computer running the app. Select **Preview batch** after entering them.
+
+   Parent-directory layout:
 
    ```text
    D:\Evaluations\
@@ -311,7 +317,14 @@ In **Evaluation setup**, choose **Batch evaluation**:
          one.wav
    ```
 
-3. Review the tests, voice/file counts, locales, genders and validation errors. The first-level folder name becomes the exact test name. Locale and gender use the same name parser as Test Reports; gender is metadata only, never inferred from audio. One locale supplies that test's language/accent target; missing or multiple locales use Auto. Voice subfolder names remain voice labels, including audio nested below them. Non-audio files are counted and ignored; empty tests, misplaced audio, links/junctions and invalid inputs are reported explicitly.
+   Equivalent test-folder list:
+
+   ```text
+   "D:\Evaluations\en-US_F"
+   "D:\Evaluations\fr-FR_M"
+   ```
+
+3. Review the tests, voice/file counts, locales, genders and validation errors. Each discovered or listed test folder's name becomes the exact test name. Locale and gender use the same name parser as Test Reports; gender is metadata only, never inferred from audio. One locale supplies that test's language/accent target; missing or multiple locales use Auto. Voice subfolder names remain voice labels, including audio nested below them. Non-audio files are counted and ignored; empty tests, misplaced audio, links/junctions and invalid inputs are reported explicitly.
 4. Confirm permission and usage charges, then select **Submit all to queue**. Every test uses the same stage, role scope, rubric snapshot, guide and judging panel, except for its name-derived language/accent. Files are prepared and tests submitted sequentially. Supported formats and browser decoding are the same as single evaluation; each file must be nonempty and at most 100 MB, each test name at most 120 characters, and each test at most 200 role/audio inputs. Both roles and long-file listening windows count toward this limit; audio is never silently truncated.
 5. Keep the browser open until submission finishes. Successfully submitted tests are saved immediately in the normal backend queue and run one at a time; a paused queue stays paused. Keep the server running. Per-test preparation/submission failures remain visible and **Submit remaining tests** retries only unsuccessful tests using the original settings snapshot. If source files change, **Preview batch** refreshes access without resubmitting successful tests. Start a new batch to change the directory or settings after submission.
 

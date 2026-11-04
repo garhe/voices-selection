@@ -10,20 +10,37 @@ export class BatchImport {
   private preview?: { token: string; files: Map<string, Source> };
 
   async plan(input: unknown): Promise<BatchPreview> {
-    const { directory } = batchDirectorySchema.parse(input);
-    if (!path.isAbsolute(directory)) throw new Error('Enter an absolute batch parent directory on the local server.');
-    const root = path.resolve(directory);
-    if (path.parse(root).root === root) throw new Error('Choose a batch directory, not a drive root.');
-    await this.validate(root, true);
+    const request = batchDirectorySchema.parse(input);
+    const roots: string[] = [];
+    for (const directory of 'directory' in request ? [request.directory] : request.directories) {
+      if (!path.isAbsolute(directory)) throw new Error('Enter absolute batch folder paths on the local server.');
+      const root = path.resolve(directory);
+      if (path.parse(root).root === root) throw new Error('Choose a batch directory, not a drive root.');
+      await this.validate(root, true);
+      if (!roots.some(existing => path.relative(existing, root) === '')) roots.push(root);
+    }
     const files = new Map<string, Source>();
-    const response: BatchPreview = { token: randomUUID(), directory: root, tests: [], ignoredFiles: 0 };
-    for (const name of (await readdir(root)).sort()) {
-      const testPath = path.join(root, name);
-      const stat = await this.validate(testPath);
-      if (!stat.isDirectory()) {
-        if (supportedAudio.test(name)) throw new Error(`Audio must be inside test and voice folders: ${name}`);
-        response.ignoredFiles++; continue;
+    const response: BatchPreview = {
+      ...('directory' in request ? { directory: roots[0] } : { directories: roots }),
+      token: randomUUID(), tests: [], ignoredFiles: 0,
+    };
+    const testPaths: string[] = [];
+    if ('directory' in request) {
+      for (const name of (await readdir(roots[0])).sort()) {
+        const testPath = path.join(roots[0], name);
+        const stat = await this.validate(testPath);
+        if (!stat.isDirectory()) {
+          if (supportedAudio.test(name)) throw new Error(`Audio must be inside test and voice folders: ${name}`);
+          response.ignoredFiles++; continue;
+        }
+        testPaths.push(testPath);
       }
+    } else testPaths.push(...roots);
+    const names = new Set<string>();
+    for (const testPath of testPaths) {
+      const name = path.basename(testPath);
+      if (names.has(name)) throw new Error(`Test folder names must be unique within a batch: ${name}`);
+      names.add(name);
       const validation = testNameSchema.safeParse(name);
       const test: BatchTest = { name, ...testNameMetadata(name), files: [], errors: [] };
       if (!validation.success) test.errors.push(validation.error.issues[0].message);
@@ -34,7 +51,7 @@ export class BatchImport {
           if (entry.isDirectory()) { await visit(absolute, voice ?? child); continue; }
           if (!supportedAudio.test(child)) { response.ignoredFiles++; continue; }
           if (!voice) { test.errors.push(`Place audio in a voice subfolder: ${child}`); continue; }
-          const relative = path.relative(root, absolute);
+          const relative = path.join(name, path.relative(testPath, absolute));
           if (voice.length > 200 || relative.length > 500) {
             test.errors.push(`Voice name or audio path is too long: ${relative}`); continue;
           }

@@ -1,17 +1,20 @@
 import { useState } from 'react';
-import type { BatchPreview, BatchTest } from '../shared/batch';
+import type { BatchPreview, BatchRequest, BatchTest } from '../shared/batch';
+import { parseSortingPaths as parseFolderPaths } from '../shared/sorting';
 import { profileSchema, settingsSchema, rolesForScope, testType, type Judge, type Profile, type Settings } from '../shared/domain';
 import { batchTestProfile, submitBatch, type BatchSubmission } from './batch';
 
 export function BatchEvaluation({ profile, config, busy, onAction, onPreview, onQueue, onRefresh }: {
   profile: Profile; config?: Settings & { configured: boolean }; busy: boolean;
   onAction: (label: string, run: () => Promise<void>) => Promise<void>;
-  onPreview: (directory: string) => Promise<BatchPreview>;
+  onPreview: (request: BatchRequest) => Promise<BatchPreview>;
   onQueue: (token: string, test: BatchTest, profile: Profile, judges: Judge[]) => Promise<{ id: string }>;
   onRefresh: () => Promise<void>;
 }) {
   const [step, setStep] = useState<'settings' | 'directory'>('settings');
   const [directory, setDirectory] = useState('');
+  const [sourceMode, setSourceMode] = useState<'parent' | 'list'>('parent');
+  const [folderPaths, setFolderPaths] = useState('');
   const [preview, setPreview] = useState<BatchPreview>();
   const [consent, setConsent] = useState(false);
   const [results, setResults] = useState<BatchSubmission[]>([]);
@@ -30,6 +33,10 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
     return issues;
   };
   const queued = results.filter(result => result.id).length;
+  const directories = parseFolderPaths(folderPaths);
+  function invalidatePreview() {
+    setPreview(undefined); setConsent(false); setResults([]);
+  }
   return <section className="card recordings-card" aria-label="Batch evaluation wizard">
     <h2>03 · Batch evaluation wizard</h2>
     {step === 'settings' ? <>
@@ -38,14 +45,25 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
       {!settingsReady && <p role="status">Complete the evaluation settings and configure Azure and the judging panel before continuing.</p>}
       <button className="primary" disabled={busy || !settingsReady} onClick={() => setStep('directory')}>Continue to batch directory</button>
     </> : <>
-      <p>Step 2 of 2: parent directory → test folders → voice folders → audio files.</p>
-      <p className="hint">Paste a directory on the computer running this app. Originals stay untouched. Supported formats: WAV, MP3, M4A, OGG, FLAC, AAC, WebM, Opus; browser codec support varies.</p>
-      <label>Batch parent directory<input value={directory} disabled={busy || !!snapshot} placeholder={'D:\\Evaluations'} onChange={event => {
-        setDirectory(event.target.value); setPreview(undefined); setConsent(false); setResults([]);
-      }} /></label>
+      <p>Step 2 of 2: choose a parent directory or list individual test folders. Each test folder contains voice folders → audio files.</p>
+      <p className="hint">Paths refer to the computer running this app. Originals stay untouched. Supported formats: WAV, MP3, M4A, OGG, FLAC, AAC, WebM, Opus; browser codec support varies.</p>
+      <label>Batch source<select value={sourceMode} disabled={busy || !!snapshot} onChange={event => {
+        setSourceMode(event.target.value === 'list' ? 'list' : 'parent'); invalidatePreview();
+      }}>
+        <option value="parent">Parent directory</option>
+        <option value="list">Test folder list</option>
+      </select></label>
+      {sourceMode === 'parent' ? <label>Batch parent directory<input value={directory} disabled={busy || !!snapshot} placeholder={'D:\\Evaluations'} onChange={event => {
+        setDirectory(event.target.value); invalidatePreview();
+      }} /></label> : <>
+        <label>Test folder paths (one absolute path per line)<textarea rows={6} value={folderPaths} disabled={busy || !!snapshot}
+          placeholder={'"D:\\Evaluations\\es-ES_M"\n"D:\\Other evaluations\\pt-BR Female VTS"'}
+          onChange={event => { setFolderPaths(event.target.value); invalidatePreview(); }} /></label>
+        <p className="hint">{directories.length} test folders entered. Paste one path per line, with or without double quotes. Spaces are preserved. Each listed folder becomes one test; its immediate subfolders are voices. Repeated paths are evaluated once; test folder names must be unique.</p>
+      </>}
       <div className="button-row">
-        <button className="secondary" disabled={busy || !directory.trim()} onClick={() => void onAction('Previewing batch directory', async () => {
-          const next = await onPreview(directory);
+        <button className="secondary" disabled={busy || (sourceMode === 'parent' ? !directory.trim() : !directories.length)} onClick={() => void onAction('Previewing batch folders', async () => {
+          const next = await onPreview(sourceMode === 'parent' ? { directory } : { directories });
           setPreview(next); setConsent(false); setResults(previous => previous.filter(result => result.id));
         })}>Preview batch</button>
         <button className="text-button" disabled={busy || !!snapshot} onClick={() => { setStep('settings'); setConsent(false); }}>Back to shared settings</button>
@@ -65,7 +83,7 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
         </table></div>
         <label className="checkbox-label"><input type="checkbox" checked={consent} disabled={busy} onChange={event => setConsent(event.target.checked)} />I have permission to send all selected audio to Azure and accept usage charges for every test and judge.</label>
         <p className="hint">Keep this browser open until submission finishes. Submitted tests are saved and run one at a time through the normal queue, even if the browser closes. Keep the server running. A paused queue stays paused. Results appear in Test Reports with the usual reports and exports.</p>
-        {snapshot && <p className="hint">Retries use the original shared settings snapshot. Successfully submitted tests are not submitted again. If source files change, preview this directory again. Start a new batch to use different settings.</p>}
+        {snapshot && <p className="hint">Retries use the original shared settings snapshot. Successfully submitted tests are not submitted again. If source files change, preview these folders again. Start a new batch to use different settings or folders.</p>}
         <div className="button-row">
           <button className="primary" disabled={busy || !consent || !settingsReady || !pending.length || pending.some(test => errors(test).length > 0)} onClick={() => void onAction('Submitting batch evaluations', async () => {
             if (!config) throw new Error('Wait for Azure settings to load.');
