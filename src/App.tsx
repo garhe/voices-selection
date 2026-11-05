@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   type Dimension, type Job, type Profile, type Settings, type Summary, type ConnectionStatus, type ConnectionTest, type EvidenceNote, type VoiceEvidence, type DraftClip, type StoredClip, type TestQueueState,
-  dimensions, dimensionLabel, dimensionWeight, profileRubric, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, retryableAudioIssue, unassessedInputs, mediaText, singleSpeakerFallbackCount, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, resolveLanguageHint, rolesForScope, testType,
+  dimensions, dimensionLabel, dimensionWeight, profileRubric, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, eligibleWeightedScore, WEIGHTED_PREFERENCE, retryableAudioIssue, unassessedInputs, mediaText, singleSpeakerFallbackCount, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, resolveLanguageHint, rolesForScope, testType,
 } from '../shared/domain';
 import { browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
 import { applyLanguageHint, displayLanguageHint, newTestProfile, evaluationBlockers, inputCount, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric } from './readiness';
@@ -53,7 +53,7 @@ function download(name: string, data: string, type: string) {
 function exportReportJson(job: Job) {
   const issues = unassessedInputs(job);
   download(`voice-evaluation-${job.id}.json`, JSON.stringify({
-    ...job, name: evaluationName(job), testType: testType(job.profile.stage), summary: summarize(job), voiceEvidence: summarizeVoiceEvidence(job),
+    ...job, name: evaluationName(job), testType: testType(job.profile.stage), summary: summarize(job), voiceEvidence: summarizeVoiceEvidence(job), weightedPreference: WEIGHTED_PREFERENCE,
     completionStatus: testStatusLabel({ status: job.status, incomplete: issues.length > 0 }),
     assessmentIssues: issues.map(({ clip, judges }) => ({
       file: clip.file, voice: clip.voice, role: clip.role, start: clip.start, end: clip.end,
@@ -62,15 +62,15 @@ function exportReportJson(job: Job) {
     improvementGuidance: voiceDirectorBriefs(job),
   }, null, 2), 'application/json');
 }
-const rubricColumns = ['rubric_preset', 'rubric_revision', 'rubric_snapshot', 'test_type', 'single_speaker_fallback_enabled', 'single_speaker_fallback_assessments'];
+const rubricColumns = ['rubric_preset', 'rubric_revision', 'rubric_snapshot', 'test_type', 'single_speaker_fallback_enabled', 'single_speaker_fallback_assessments', 'weighted_preference_version', 'weighted_preference_base_weights'];
 function rubricCells(job: Job) {
   const { profile } = job;
-  return [profile.rubric?.name, profile.rubric?.revision, profile.rubric && JSON.stringify(profile.rubric), testType(profile.stage), !!profile.singleSpeakerFallback, singleSpeakerFallbackCount(job)];
+  return [profile.rubric?.name, profile.rubric?.revision, profile.rubric && JSON.stringify(profile.rubric), testType(profile.stage), !!profile.singleSpeakerFallback, singleSpeakerFallbackCount(job), WEIGHTED_PREFERENCE.version, JSON.stringify(WEIGHTED_PREFERENCE.weights)];
 }
 function exportCsv(job: Job) {
   const rows: unknown[][] = [[
     'test_name', 'evaluation_id', 'created_at', 'voice', 'file', 'role', 'start_seconds', 'end_seconds', 'channel', 'judge', 'deployment', 'reported_model',
-    'stage', 'speaker_mode', 'rubric', 'language_hint', 'input_language_hint', 'target_market', 'status', 'response_format', 'language', 'language_supported', 'assessable', 'preference_score',
+    'stage', 'speaker_mode', 'rubric', 'language_hint', 'input_language_hint', 'target_market', 'status', 'response_format', 'language', 'language_supported', 'assessable', 'preference_score', 'weighted_preference_score',
     'role_attribution_status', 'role_attribution_evidence',
     ...dimensions, 'error', 'observations', 'limitations', 'dimension_reasons', 'audio_diagnostics', 'previous_evaluations', ...rubricColumns,
   ]];
@@ -81,6 +81,7 @@ function exportCsv(job: Job) {
       evaluationName(job), job.id, job.createdAt, clip.voice, clip.file, clip.role, clip.start, clip.end, clip.channel, judge.name, judge.deployment, r.model,
       job.profile.stage, job.profile.speakerMode ?? 'manual', job.rubric, job.profile.language, clip.language, job.profile.targetMarket, r.status, r.responseFormat, r.assessment?.language, r.assessment?.languageSupported,
       r.assessment?.assessable, r.assessment ? eligibleScore(r.assessment, job.profile) : null,
+      r.assessment ? eligibleWeightedScore(r.assessment, job.profile) : null,
       r.assessment?.speakerAttribution?.status, r.assessment?.speakerAttribution?.evidence,
       ...dimensions.map(d => r.assessment?.scores[d]), r.error,
       r.assessment?.observations.join(' | '), r.assessment?.limitations.join(' | '), JSON.stringify(r.assessment?.reasons),
@@ -117,13 +118,14 @@ function exportVoiceMatrixCsv(job: Job) {
   const notes = (values: EvidenceNote[]) => values.length ? values.map(note =>
     `${note.text}\n${mediaText('Source recordings', job.profile.stage)} (${note.files.length}): ${note.files.join(' | ')}`).join('\n\n') : 'None recorded.';
   const rows: unknown[][] = [[
-    'test_name', 'evaluation_id', 'rubric', 'language_hint', 'target_market', 'voice', 'role', 'panel_preference_score', 'panel_eligible_files', 'total_files',
+    'test_name', 'evaluation_id', 'rubric', 'language_hint', 'target_market', 'voice', 'role', 'panel_preference_score', 'panel_weighted_preference_score', 'panel_eligible_files', 'total_files',
     ...job.judges.map(judge => `${judge.name} (${judge.deployment})`), ...rubricColumns,
   ]];
   for (const voice of summarizeVoiceEvidence(job)) rows.push([
-    evaluationName(job), job.id, job.rubric, job.profile.language, job.profile.targetMarket, voice.voice, voice.role, voice.score, voice.eligibleFiles, voice.files,
+    evaluationName(job), job.id, job.rubric, job.profile.language, job.profile.targetMarket, voice.voice, voice.role, voice.score, voice.weightedScore, voice.eligibleFiles, voice.files,
     ...voice.judges.map(judge => [
       `Single-judge preference (1-5): ${score(judge.score)}`,
+      `Single-judge weighted preference (1-5): ${score(judge.weightedScore)}`,
       `${mediaText('Scored recordings', job.profile.stage)}: ${judge.scoredFiles}/${voice.files}`,
       `OVERALL COMMENTS:\n${notes(judge.observations)}`,
       `LIMITATIONS:\n${notes(judge.limitations)}`,
@@ -143,12 +145,14 @@ function VoiceJudgeMatrix({ job, voices }: { job: Job; voices: VoiceEvidence[] }
     <p className="hint">{w('Scores use eligible recordings only. Comments can also come from excluded recordings; each lists its sources. Single-judge scores are not full-panel scores. Incomplete recording coverage limits comparisons. The view and CSV include the complete evaluation with all comments and reasons.')}</p>
     <div className="table-scroll matrix-scroll" tabIndex={0} role="region" aria-label="Scrollable judge comments matrix">
       <table><caption>{evaluationName(job)} · Saved-evidence report · Scores out of 5, not MOS</caption>
-        <thead><tr><th scope="col">Voice / role</th><th scope="col">Full-panel preference</th>{job.judges.map(judge => <th scope="col" key={judge.id}>{judge.name}<small>{judge.deployment}</small></th>)}</tr></thead>
+        <thead><tr><th scope="col">Voice / role</th><th scope="col">Full-panel preference</th><th scope="col">Weighted Preference</th>{job.judges.map(judge => <th scope="col" key={judge.id}>{judge.name}<small>{judge.deployment}</small></th>)}</tr></thead>
         <tbody>{voices.map(voice => <tr key={JSON.stringify([voice.voice, voice.role])}>
           <th scope="row"><strong>{voice.voice}</strong><small>{voice.role}</small></th>
           <td><strong>{score(voice.score)}{voice.score !== null && ' / 5'}</strong><small>{voice.eligibleFiles}/{voice.files} {w('eligible recordings')}</small>{voice.eligibleFiles < voice.files && <p className="hint">Incomplete coverage</p>}</td>
+          <td><strong>{score(voice.weightedScore)}{voice.weightedScore !== null && ' / 5'}</strong><small>Natural / expressive emphasis</small></td>
           {voice.judges.map(judge => <td key={judge.judgeId}>
             <p><strong>{score(judge.score)}{judge.score !== null && ' / 5'}</strong><small>Single-judge preference · {judge.scoredFiles}/{voice.files} {w('recordings scored')}</small></p>
+            <p><strong>{score(judge.weightedScore)}{judge.weightedScore !== null && ' / 5'}</strong><small>Single-judge Weighted Preference</small></p>
             <h3>Overall comments</h3>
             {judge.observations.length ? <EvidenceList notes={judge.observations.slice(0, 2)} stage={job.profile.stage} /> : <p>No overall comments recorded.</p>}
             {judge.observations.length > 2 && <details><summary>More overall comments ({judge.observations.length - 2})</summary><EvidenceList notes={judge.observations.slice(2)} stage={job.profile.stage} /></details>}
@@ -158,7 +162,7 @@ function VoiceJudgeMatrix({ job, voices }: { job: Job; voices: VoiceEvidence[] }
             <details><summary>Why these ratings</summary>{judge.dimensions.map(d => <div key={d.dimension}><h4>{dimensionLabel(job.profile, d.dimension)} · {score(d.score)}{d.diagnostic && ' (diagnostic only)'}</h4>{d.reasons.length ? <EvidenceList notes={d.reasons} stage={job.profile.stage} /> : <p>No scored evidence available; check scoring gaps.</p>}</div>)}</details>
           </td>)}
         </tr>)}
-          {!voices.length && <tr><td colSpan={job.judges.length + 2}>{w('No recording evidence is available yet.')}</td></tr>}
+          {!voices.length && <tr><td colSpan={job.judges.length + 3}>{w('No recording evidence is available yet.')}</td></tr>}
         </tbody>
       </table>
     </div>
@@ -960,11 +964,13 @@ export function App() {
           <div className="metrics"><Metric label="Judge assessments finished" value={`${finished} / ${job.results.length}`} /><Metric label="Failures" value={String(failures)} /><Metric label="Unassessable / partial" value={String(needsReview)} /><Metric label={reportText('Recording quality')} value={activeDimensions(job.profile).includes('audioQuality') ? 'Included' : 'Diagnostic only'} /></div>
           <div className="callout">{reportText('Scores are uncalibrated AI opinions on a 1–5 scale, not MOS. Consensus requires every configured judge. In automatic mode, windows unanimously marked role not present are excluded and counted; ambiguous roles, disagreements and failures prevent the recording from entering the preference average. The overall preference score uses the rubric weights for active dimensions; it is not a probability or proof of voice superiority.')}</div>
           <section className="card"><div className="section-with-action"><div><h2>{reportText('Recording-set comparison')}</h2><p className="hint">{reportText('Duration-weighted regions → one recording score → equal-weight recording average. Agent and customer requests stay separate; fallback is explicitly labelled.')}</p></div></div>
-            <div className="table-scroll"><table><thead><tr><th>Voice / requested role</th><th>Eligible files</th><th>Preference</th>{activeDimensions(job.profile).map(d => <th key={d}>{dimensionLabel(job.profile, d)}</th>)}<th>Judge spread</th></tr></thead><tbody>
+            <p className="hint">Weighted Preference ({WEIGHTED_PREFERENCE.version}) is an experimental comparison from the same saved ratings: naturalness 35%, expressiveness 25%, articulation 15%, target-style fit 10%, pace 10%, accent fit 5%. Only active dimensions contribute; their weights are renormalized. Audio quality is excluded from this metric in both stages. Original eligibility, equal judge weights and recording aggregation are preserved. No new Azure calls. These weights are not validated against human preferences.</p>
+            <div className="table-scroll"><table><thead><tr><th>Voice / requested role</th><th>Eligible files</th><th>Preference</th><th>Weighted Preference</th><th>Weighted − Preference</th>{activeDimensions(job.profile).map(d => <th key={d}>{dimensionLabel(job.profile, d)}</th>)}<th>Judge spread</th></tr></thead><tbody>
               {summary.map(s => <SummaryRow key={JSON.stringify([s.voice, s.role])} summary={s} dimensions={activeDimensions(job.profile)} />)}
-              {!summary.length && <tr><td colSpan={10}>{reportText('No recording evidence is available yet.')}</td></tr>}
+              {!summary.length && <tr><td colSpan={6 + activeDimensions(job.profile).length}>{reportText('No recording evidence is available yet.')}</td></tr>}
             </tbody></table></div>
             <p className="hint">{reportText('Judge spread = mean per-region max–min preference score. It is disagreement, not a confidence interval. Recording score ranges and language labels appear below; language mixes and unequal recording sets can bias comparisons.')}</p>
+            <p className="hint">Ranking, best-voice labels and judge spread still use the original Preference. Weighted Preference does not reward agreement or alter saved assessments. If only audio quality is active, Weighted Preference is not assessed.</p>
             <div className="summary-notes">{summary.map(s => <span key={JSON.stringify([s.voice, s.role])}><strong>{s.voice} / {s.role}</strong> · {reportText('recording range')} {score(s.min)}–{score(s.max)} · {s.languages.join(', ') || 'language pending'}{s.absentWindows > 0 && ` · ${s.absentWindows} role-absent windows excluded`}</span>)}</div>
           </section>
           <VoiceJudgeMatrix job={job} voices={voiceEvidence} />
@@ -1010,7 +1016,7 @@ export function App() {
                     </div>)}
                   </details>}
                   {r.status === 'completed' && assessmentGaps(r, job.profile, c.role).length > 0 && <div className="callout"><strong>Why this assessment cannot supply a preference score</strong><ul>{assessmentGaps(r, job.profile, c.role).map(gap => <li key={gap}>{gap}</li>)}</ul></div>}
-                  {r.assessment && <>{r.assessment.speakerAttribution && <div className="callout"><strong>{r.assessment.speakerAttribution.status === 'single_speaker_fallback' ? 'Single-speaker fallback — requested agent not identified' : `Role: ${r.assessment.speakerAttribution.role} · ${r.assessment.speakerAttribution.status}`}</strong><p>{r.assessment.speakerAttribution.evidence}</p></div>}<p className="hint">{r.assessment.language} · {r.assessment.languageSupported ? 'Model reports language assessable (not independently validated)' : 'Language not reliably supported'} · preference: {score(eligibleScore(r.assessment, job.profile))}</p>
+                  {r.assessment && <>{r.assessment.speakerAttribution && <div className="callout"><strong>{r.assessment.speakerAttribution.status === 'single_speaker_fallback' ? 'Single-speaker fallback — requested agent not identified' : `Role: ${r.assessment.speakerAttribution.role} · ${r.assessment.speakerAttribution.status}`}</strong><p>{r.assessment.speakerAttribution.evidence}</p></div>}<p className="hint">{r.assessment.language} · {r.assessment.languageSupported ? 'Model reports language assessable (not independently validated)' : 'Language not reliably supported'} · preference: {score(eligibleScore(r.assessment, job.profile))} · Weighted Preference: {score(eligibleWeightedScore(r.assessment, job.profile))}</p>
                     <dl>{dimensions.map(d => <div key={d}><dt>{dimensionLabel(job.profile, d)} {d === 'audioQuality' && !activeDimensions(job.profile).includes(d) && <small>(diagnostic)</small>}<b>{score(r.assessment!.scores[d])}</b></dt><dd>{r.assessment!.reasons[d] ?? (d === 'accentFit' ? 'Not assessed in this saved evaluation.' : '')}</dd></div>)}</dl>
                     {!!r.assessment.observations.length && <><h4>Observations</h4><ul>{r.assessment.observations.map((o, i) => <li key={i}>{o}</li>)}</ul></>}
                     {!!r.assessment.limitations.length && <><h4>Limitations</h4><ul className="limitations">{r.assessment.limitations.map((o, i) => <li key={i}>{o}</li>)}</ul></>}</>}
@@ -1030,5 +1036,6 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
 }
 function SummaryRow({ summary: s, dimensions: ds }: { summary: Summary; dimensions: Dimension[] }) {
-  return <tr><td><strong>{s.voice}</strong><small>{s.role}</small></td><td>{s.eligibleFiles} / {s.files}</td><td><span className="score">{score(s.score)}</span></td>{ds.map(d => <td key={d}>{score(s.dimensions[d])}</td>)}<td>{score(s.disagreement)}</td></tr>;
+  const delta = s.score !== null && s.weightedScore !== null ? s.weightedScore - s.score : null;
+  return <tr><td><strong>{s.voice}</strong><small>{s.role}</small></td><td>{s.eligibleFiles} / {s.files}</td><td><span className="score">{score(s.score)}</span></td><td><span className="score">{score(s.weightedScore)}</span></td><td>{delta === null ? 'Not assessed' : `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`}</td>{ds.map(d => <td key={d}>{score(s.dimensions[d])}</td>)}<td>{score(s.disagreement)}</td></tr>;
 }

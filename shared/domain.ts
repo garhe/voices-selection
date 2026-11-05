@@ -263,6 +263,18 @@ export function eligibleScore(assessment: Assessment, profile: Profile): number 
   const totalWeight = active.reduce((sum, d) => sum + dimensionWeight(profile, d), 0);
   return active.reduce((sum, d, index) => sum + scores[index] * dimensionWeight(profile, d), 0) / totalWeight;
 }
+export const WEIGHTED_PREFERENCE = {
+  version: 'natural-expressive-v1',
+  weights: { naturalness: 35, articulation: 15, pace: 10, expressiveness: 25, contextFit: 10, accentFit: 5, audioQuality: 0 },
+} as const;
+export function eligibleWeightedScore(assessment: Assessment, profile: Profile): number | null {
+  if (eligibleScore(assessment, profile) === null) return null;
+  const active = activeDimensions(profile).filter(d => WEIGHTED_PREFERENCE.weights[d] > 0);
+  const totalWeight = active.reduce((sum, d) => sum + WEIGHTED_PREFERENCE.weights[d], 0);
+  return totalWeight > 0
+    ? active.reduce((sum, d) => sum + assessment.scores[d]! * WEIGHTED_PREFERENCE.weights[d], 0) / totalWeight
+    : null;
+}
 export function claimsMissingAudio(assessment: Assessment): boolean {
   if (assessment.assessable && assessment.languageSupported) return false;
   if (assessment.speakerAttribution?.status === 'not_present') return false;
@@ -318,7 +330,7 @@ export function normalizeAssessment(value: unknown, profile: Profile, role?: Cli
 
 export type Summary = {
   voice: string; role: string; files: number; eligibleFiles: number;
-  score: number | null; min: number | null; max: number | null;
+  score: number | null; weightedScore: number | null; min: number | null; max: number | null;
   dimensions: Record<Dimension, number | null>; disagreement: number | null; languages: string[];
   absentWindows: number;
 };
@@ -344,12 +356,14 @@ export function summarize(job: Job): Summary[] {
       naturalness: [], articulation: [], pace: [], expressiveness: [], contextFit: [], accentFit: [], audioQuality: [],
     };
     const fileScores: number[] = [];
+    const weightedFileScores: number[] = [];
     const spreads: number[] = [];
     const languages = new Set<string>();
     let absentWindows = 0;
     for (const fileClips of fileGroups.values()) {
       let requiredRegions = fileClips.length;
       const regionScores: { score: number; seconds: number }[] = [];
+      const weightedRegionScores: { score: number; seconds: number }[] = [];
       const dimensionRegions: Record<Dimension, { score: number; seconds: number }[]> = {
         naturalness: [], articulation: [], pace: [], expressiveness: [], contextFit: [], accentFit: [], audioQuality: [],
       };
@@ -368,6 +382,9 @@ export function summarize(job: Job): Summary[] {
         if (scores.every((s): s is number => s !== null)) {
           regionScores.push({ score: mean(scores)!, seconds });
           spreads.push(Math.max(...scores) - Math.min(...scores));
+          const weightedScores = results.map(r => eligibleWeightedScore(r.assessment!, job.profile));
+          if (weightedScores.every((s): s is number => s !== null))
+            weightedRegionScores.push({ score: mean(weightedScores)!, seconds });
         }
         for (const d of dimensions) {
           const values = results.map(r => {
@@ -382,12 +399,13 @@ export function summarize(job: Job): Summary[] {
         values.reduce((total, v) => total + v.score * v.seconds, 0) / values.reduce((total, v) => total + v.seconds, 0);
       // Every selected region must be eligible before its recording enters the overall average.
       if (requiredRegions > 0 && regionScores.length === requiredRegions) fileScores.push(weighted(regionScores));
+      if (requiredRegions > 0 && weightedRegionScores.length === requiredRegions) weightedFileScores.push(weighted(weightedRegionScores));
       for (const d of dimensions) if (requiredRegions > 0 && dimensionRegions[d].length === requiredRegions)
         dimensionFiles[d].push(weighted(dimensionRegions[d]));
     }
     return {
       voice: clips[0].voice, role: clips[0].role, files: fileGroups.size, eligibleFiles: fileScores.length,
-      score: mean(fileScores), min: fileScores.length ? Math.min(...fileScores) : null,
+      score: mean(fileScores), weightedScore: mean(weightedFileScores), min: fileScores.length ? Math.min(...fileScores) : null,
       max: fileScores.length ? Math.max(...fileScores) : null,
       dimensions: Object.fromEntries(dimensions.map(d => [d, mean(dimensionFiles[d])])) as Summary['dimensions'],
       disagreement: mean(spreads), languages: [...languages], absentWindows,
@@ -429,9 +447,9 @@ export function unassessedInputs(job: Job) {
 }
 
 export type VoiceEvidence = {
-  voice: string; role: string; files: number; eligibleFiles: number; score: number | null;
+  voice: string; role: string; files: number; eligibleFiles: number; score: number | null; weightedScore: number | null;
   judges: {
-    judgeId: string; scoredFiles: number; score: number | null;
+    judgeId: string; scoredFiles: number; score: number | null; weightedScore: number | null;
     gaps: EvidenceNote[]; observations: EvidenceNote[]; limitations: EvidenceNote[];
     dimensions: { dimension: Dimension; score: number | null; diagnostic: boolean; reasons: EvidenceNote[] }[];
   }[];
@@ -452,13 +470,13 @@ export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
   return summarize(job).map(summary => {
     const clips = job.clips.filter(c => c.voice === summary.voice && c.role === summary.role);
     return {
-      voice: summary.voice, role: summary.role, files: summary.files, eligibleFiles: summary.eligibleFiles, score: summary.score,
+      voice: summary.voice, role: summary.role, files: summary.files, eligibleFiles: summary.eligibleFiles, score: summary.score, weightedScore: summary.weightedScore,
       judges: job.judges.map(judge => {
         const entries = clips.map(clip => ({ clip, result: job.results.find(r => r.clipId === clip.id && r.judgeId === judge.id) }));
         const completed = entries.filter(entry => entry.result?.status === 'completed' && entry.result.assessment);
         const own = summarize({ ...job, clips, judges: [judge], results: job.results.filter(r => r.judgeId === judge.id) })[0];
         return {
-          judgeId: judge.id, scoredFiles: own.eligibleFiles, score: own.score,
+          judgeId: judge.id, scoredFiles: own.eligibleFiles, score: own.score, weightedScore: own.weightedScore,
           gaps: notes(entries.flatMap(({ clip, result }) => assessmentGaps(result, job.profile, clip.role).map(text => ({ text, file: clip.file })))),
           observations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.observations.map(text => ({ text, file: clip.file })))),
           limitations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.limitations.map(text => ({ text, file: clip.file })))),

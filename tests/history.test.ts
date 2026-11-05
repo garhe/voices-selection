@@ -847,7 +847,7 @@ test('selected-test CSV separates names, overall scores and judge scores for tie
   const snapshot = JSON.stringify(values);
   const csv = testTableCsv(values);
   const table = csvTable(csv);
-  assert.equal(table.headers.length, 17, 'Five metadata columns and four voice groups of three columns.');
+  assert.equal(table.headers.length, 23, 'Five metadata columns, four voice groups of four columns and two weighting metadata columns.');
   assert.ok(table.headers.every(header => !/\brole\b/i.test(header)), 'No role columns are exported.');
   const [first, second] = table.rows;
   assert.equal(first['Test name'], scored.name);
@@ -857,13 +857,16 @@ test('selected-test CSV separates names, overall scores and judge scores for tie
   assert.equal(first.Gender, 'Female');
   assert.equal(first['Best voice 1 name'], 'Tied, "voice"');
   assert.equal(first['Best voice 1 overall score'], '4.00');
+  assert.equal(first['Best voice 1 Weighted Preference'], '4.00');
   assert.equal(first['Best voice 1 - Judge 1 (deployment-0) average score'], '4.00');
   assert.equal(first['Best voice 2 name'], 'Winner');
   assert.equal(first['Other voice 1 name'], 'Other');
   assert.equal(first['Other voice 1 overall score'], '2.00');
+  assert.equal(first['Other voice 1 Weighted Preference'], '2.00');
   assert.equal(first['Other voice 1 - Judge 1 (deployment-0) average score'], '2.00');
   assert.equal(first['Other voice 2 name'], 'Unassessed');
   assert.equal(first['Other voice 2 overall score'], 'Not assessed');
+  assert.equal(first['Other voice 2 Weighted Preference'], 'Not assessed');
   assert.equal(first['Other voice 2 - Judge 1 (deployment-0) average score'], 'Not assessed');
   assert.equal(second['Best voice 1 name'], '');
   assert.equal(second['Best voice 1 overall score'], 'Not assessed');
@@ -873,13 +876,35 @@ test('selected-test CSV separates names, overall scores and judge scores for tie
   assert.equal(second.Locale, 'Not specified');
   assert.equal(second.Gender, 'Unspecified');
   assert.equal(testTableCsv(Array.from({ length: 65 }, () => scored)).split('\r\n').length, 66, 'Exports are not limited to the visible page.');
-  assert.equal(testTableCsv([]), '\uFEFF"Test name","Test time","Test type","Locale","Gender","Best voice name","Best voice overall score"');
+  assert.deepEqual(csvTable(testTableCsv([])).headers, [
+    'Test name', 'Test time', 'Test type', 'Locale', 'Gender', 'Best voice name', 'Best voice overall score',
+    'Best voice Weighted Preference', 'Weighted Preference version', 'Weighted Preference base weights',
+  ]);
+  assert.equal(first['Weighted Preference version'], 'natural-expressive-v1');
+  assert.equal(JSON.parse(first['Weighted Preference base weights']).naturalness, 35);
   assert.equal(JSON.stringify(values), snapshot);
   const only = job([clip({ voice: 'Only winner' })], [5]);
   const single = csvTable(testTableCsv([only]));
   assert.equal(single.rows[0]['Best voice name'], 'Only winner');
   assert.equal(single.rows[0]['Best voice overall score'], '5.00');
   assert.ok(single.headers.every(header => !header.startsWith('Other voice')));
+});
+
+test('weighted selected-test columns stay aligned across unequal voice counts and fallback coverage', () => {
+  const many = job([clip({ voice: 'A', role: 'agent' }), clip({ voice: 'B', role: 'agent' })], [4]);
+  many.profile = { ...many.profile, scope: 'agent', speakerMode: 'automatic', singleSpeakerFallback: true };
+  for (const result of many.results) result.assessment!.speakerAttribution = {
+    role: 'agent', status: 'single_speaker_fallback', singleSpeaker: true, evidence: 'One speaker confirmed.',
+  };
+  const few = job([clip({ voice: 'Only' })], [3]);
+  const rows = csvTable(testTableCsv([many, few])).rows;
+  assert.equal(rows[0]['Single-speaker fallback assessments'], '2');
+  assert.equal(rows[1]['Single-speaker fallback assessments'], '0');
+  assert.equal(rows[0]['Best voice 1 Weighted Preference'], '4.00');
+  assert.equal(rows[0]['Best voice 2 Weighted Preference'], '4.00');
+  assert.equal(rows[1]['Best voice 1 Weighted Preference'], '3.00');
+  assert.equal(rows[1]['Best voice 2 Weighted Preference'], '');
+  assert.equal(rows[1]['Weighted Preference version'], 'natural-expressive-v1');
 });
 
 test('history and selected CSVs choose higher naturalness for tied overall scores and retain true ties', () => {

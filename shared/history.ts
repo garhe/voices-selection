@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { compareVoiceScores, evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, testType, unassessedInputs, singleSpeakerFallbackCount, voiceGenders, type Job, type VoiceGender } from './domain.js';
+import { compareVoiceScores, evaluationName, summarize, summarizeVoiceEvidence, testNameSchema, testType, unassessedInputs, singleSpeakerFallbackCount, voiceGenders, WEIGHTED_PREFERENCE, type Job, type VoiceGender } from './domain.js';
 import { csvCell } from './csv.js';
 
 export const testMetadataSchema = z.object({
@@ -91,26 +91,29 @@ export function testTableCsv(jobs: Job[]): string {
   const includeFallback = jobs.some(job => singleSpeakerFallbackCount(job) > 0);
   const rows = [
     ['Test name', 'Test time', 'Test type', 'Locale', 'Gender', ...groups.flatMap(({ label }) => [
-      `${label} name`, `${label} overall score`,
+      `${label} name`, `${label} overall score`, `${label} Weighted Preference`,
       ...[...judgeColumns.values()].map(judge => `${label} - ${judge} average score`),
-    ]), ...(includeFallback ? ['Single-speaker fallback assessments'] : [])],
+    ]), 'Weighted Preference version', 'Weighted Preference base weights', ...(includeFallback ? ['Single-speaker fallback assessments'] : [])],
     ...reports.map(report => {
       const metadata = testNameMetadata(evaluationName(report.job));
       return [
         evaluationName(report.job), report.job.createdAt, testType(report.job.profile.stage), metadata.languages.join(', ') || 'Not specified', metadata.genders.join(', ') || 'Unspecified',
         ...groups.flatMap(({ kind, index }) => {
           const voice = report[kind][index];
-          if (!voice) return ['', kind === 'best' && index === 0 && !report.best.length ? 'Not assessed' : '', ...[...judgeColumns].map(() => '')];
+          if (!voice) return ['', kind === 'best' && index === 0 && !report.best.length ? 'Not assessed' : '', '', ...[...judgeColumns].map(() => '')];
           return [
             voice.voice, voice.score === null ? 'Not assessed' : voice.score.toFixed(2),
+            voice.weightedScore === null ? 'Not assessed' : voice.weightedScore.toFixed(2),
             ...[...judgeColumns.keys()].map(key => {
               const judgeId = report.judges.get(key);
               if (!judgeId) return '';
               const score = voice.judges.find(judge => judge.judgeId === judgeId)?.score;
               return score == null ? 'Not assessed' : score.toFixed(2);
-            }), ...(includeFallback ? [singleSpeakerFallbackCount(report.job)] : []),
+            }),
           ];
         }),
+        WEIGHTED_PREFERENCE.version, JSON.stringify(WEIGHTED_PREFERENCE.weights),
+        ...(includeFallback ? [singleSpeakerFallbackCount(report.job)] : []),
       ];
     }),
   ];
