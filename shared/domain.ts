@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const RUBRIC_VERSION = 'audio-only-v4';
 export const SAMPLE_RATE = 24000;
 export const MAX_SECONDS = 120;
+export const DEFAULT_JUDGE_DEPLOYMENTS = ['gpt-realtime-1.5', 'gpt-realtime', 'gpt-realtime-mini', 'gpt-realtime-2.1-mini', 'gpt-realtime-2.1'] as const;
 export function testType(stage: Profile['stage']): string {
   return stage === 'audition' ? 'Voice Selection' : 'TTS evaluation';
 }
@@ -226,10 +227,13 @@ export type Job = {
   voiceLabels?: VoiceLabel[];
   queueOrder?: number;
   retrySelection?: { clipId: string; judgeId: string }[];
+  autoRetry?: boolean;
+  autoRetryCount?: number;
+  retryAfter?: string;
 };
 export type TestQueueState = {
-  paused: boolean; active?: { id: string; name: string; retry?: boolean };
-  waiting: { id: string; name: string; retry?: boolean }[]; error?: string;
+  paused: boolean; active?: { id: string; name: string; retry?: boolean; autoRetryCount?: number };
+  waiting: { id: string; name: string; retry?: boolean; autoRetryCount?: number }[]; error?: string;
 };
 export function evaluationName(value: { name?: string }): string {
   return value.name?.trim() || 'Untitled evaluation';
@@ -451,7 +455,7 @@ export type VoiceEvidence = {
   judges: {
     judgeId: string; scoredFiles: number; score: number | null; weightedScore: number | null;
     gaps: EvidenceNote[]; observations: EvidenceNote[]; limitations: EvidenceNote[];
-    dimensions: { dimension: Dimension; score: number | null; diagnostic: boolean; reasons: EvidenceNote[] }[];
+    dimensions: { dimension: Dimension; score: number | null; diagnostic: boolean; reasons: EvidenceNote[]; improvements: EvidenceNote[] }[];
   }[];
 };
 export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
@@ -482,6 +486,15 @@ export function summarizeVoiceEvidence(job: Job): VoiceEvidence[] {
           limitations: notes(completed.flatMap(({ clip, result }) => result!.assessment!.limitations.map(text => ({ text, file: clip.file })))),
           dimensions: dimensions.filter(d => activeDimensions(job.profile).includes(d) || d === 'audioQuality').map(d => ({
             dimension: d, score: own.dimensions[d], diagnostic: d === 'audioQuality' && !activeDimensions(job.profile).includes(d),
+            improvements: notes(completed.flatMap(({ clip, result }) => {
+              const a = result!.assessment!;
+              if (!activeDimensions(job.profile).includes(d) || !hasScoringSpeaker(a, job.profile, clip.role) ||
+                  eligibleScore(a, job.profile) === null) return [];
+              return (a.rehearsalCases ?? []).filter(item => item.dimension === d && a.scores[d] !== null).map(item => ({
+                file: clip.file,
+                text: `Excerpt ${clip.start}-${clip.end}s. Find: ${item.cue} | Defect heard / listener impact: ${item.observation} | Improve: ${item.direction} | Pass check: ${item.check}`,
+              }));
+            })),
             reasons: notes(completed.flatMap(({ clip, result }) => {
               const a = result!.assessment!;
               const identified = hasScoringSpeaker(a, job.profile, clip.role);

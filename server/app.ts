@@ -5,7 +5,7 @@ import { z, ZodError } from 'zod';
 import {
   clipSchema, clipScopeError, settingsSchema, profileSchema, languageHintSchema, resolveLanguageHint, testNameSchema, evaluationName, retryableAudioIssue, SAMPLE_RATE, MAX_SECONDS, RUBRIC_VERSION,
   type Job, type Profile, type StoredClip, type TestQueueState, type JudgeResult, unassessedInputs,
-  rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, type Rubric,
+  rubricSchema, rubricContentSchema, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, type Rubric,
 } from '../shared/domain.js';
 import { measurements, wav } from './audio.js';
 import { judgeAudio, JudgeAudioError, testRealtimeConnection } from './realtime.js';
@@ -23,6 +23,23 @@ function evaluationResults(job: Job): JudgeResult[] {
     ? job.results.filter(result => selection.some(selected => selected.clipId === result.clipId && selected.judgeId === result.judgeId))
     : job.results;
 }
+function unassessedResults(job: Job, file?: string): JudgeResult[] {
+  return unassessedInputs(job).filter(input => !file || input.clip.file === file)
+    .flatMap(input => input.judges.map<JudgeResult>(({ judge, result }) => result ?? {
+      clipId: input.clip.id, judgeId: judge.id, status: 'pending',
+    }));
+}
+function prepareRetry(job: Job, selected: JudgeResult[]) {
+  for (const result of selected) {
+    if (job.results.includes(result)) {
+      const { clipId: _clipId, judgeId: _judgeId, previousEvaluations, ...evaluation } = result;
+      result.previousEvaluations = [...(previousEvaluations ?? []), { ...evaluation, retriedAt: new Date().toISOString() }];
+    } else job.results.push(result);
+    result.status = 'pending'; delete result.error; delete result.assessment; delete result.model;
+    delete result.responseFormat; delete result.audioDiagnostics;
+  }
+  job.retrySelection = selected.map(({ clipId, judgeId }) => ({ clipId, judgeId }));
+}
 const jobRequest = z.object({
   name: testNameSchema,
   profile: profileSchema,
@@ -32,6 +49,7 @@ const jobRequest = z.object({
   })).max(200).optional(),
   consent: z.literal(true),
   enqueue: z.boolean().optional(),
+  autoRetry: z.boolean().optional(),
   judges: settingsSchema.innerType().shape.judges.optional(),
 }).refine(r => new Set(r.clipIds).size === r.clipIds.length, 'Clip IDs must be unique.')
   .refine(r => !r.clipOverrides || (new Set(r.clipOverrides.map(c => c.id)).size === r.clipOverrides.length &&
@@ -55,7 +73,7 @@ export async function createApp(options: {
   const connection = new Connection(store, { endpoint: options.endpoint, key: options.key });
   await connection.load();
   if (!await store.exists('settings.json')) {
-    const deployments = (options.deployments || 'gpt-realtime-2.1,gpt-realtime-2.1-mini').split(',').map(s => s.trim()).filter(Boolean);
+    const deployments = options.deployments ? options.deployments.split(',').map(s => s.trim()).filter(Boolean) : DEFAULT_JUDGE_DEPLOYMENTS;
     await store.save('settings.json', settingsSchema.parse({
       judges: deployments.map((deployment, i) => ({ id: randomUUID(), name: `Judge ${i + 1}`, deployment })),
     }));
@@ -66,7 +84,12 @@ export async function createApp(options: {
   let rubrics = await store.exists('rubrics.json') ? rubricLibrarySchema.parse(await store.read('rubrics.json')) : [];
   let rubricWrite = false;
   const savedJobs = await store.jobs();
+  let queueOrder = Math.max(0, ...savedJobs.map(job => job.queueOrder ?? 0));
   for (const job of savedJobs) {
+    if (job.retryAfter !== undefined) {
+      delete job.retryAfter;
+      await store.saveJob(job);
+    }
     if (job.status === 'running') {
       job.status = 'interrupted';
       for (const result of evaluationResults(job)) if (['running', 'pending'].includes(result.status)) {
@@ -74,13 +97,20 @@ export async function createApp(options: {
       }
       await store.saveJob(job);
     }
+    if (job.autoRetry && ['completed', 'interrupted'].includes(job.status)) {
+      const selected = unassessedResults(job);
+      if (selected.length) {
+        prepareRetry(job, selected);
+        job.status = 'queued'; job.queueOrder = ++queueOrder;
+        await store.saveJob(job);
+      }
+    }
   }
   const app = express();
   app.disable('x-powered-by');
   let active: { job: Job; controller: AbortController } | undefined;
   const waiting = savedJobs.filter(job => job.status === 'queued')
     .sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0) || a.createdAt.localeCompare(b.createdAt));
-  let queueOrder = Math.max(0, ...savedJobs.map(job => job.queueOrder ?? 0));
   let queuePaused = waiting.length > 0;
   let queueError: string | undefined;
   let dispatching = false;
@@ -94,8 +124,8 @@ export async function createApp(options: {
   function queueState(): TestQueueState {
     return {
       paused: queuePaused, error: queueError,
-      active: active ? { id: active.job.id, name: evaluationName(active.job), retry: active.job.retrySelection ? true : undefined } : undefined,
-      waiting: waiting.map(job => ({ id: job.id, name: evaluationName(job), retry: job.retrySelection ? true : undefined })),
+      active: active ? { id: active.job.id, name: evaluationName(active.job), retry: active.job.retrySelection ? true : undefined, autoRetryCount: active.job.autoRetryCount } : undefined,
+      waiting: waiting.map(job => ({ id: job.id, name: evaluationName(job), retry: job.retrySelection ? true : undefined, autoRetryCount: job.autoRetryCount })),
     };
   }
   async function drainQueue() {
@@ -116,11 +146,12 @@ export async function createApp(options: {
       if (next) { next.status = 'queued'; waiting.unshift(next); active = undefined; }
     } finally { dispatching = false; }
   }
-  function newEvaluation(input: Pick<Job, 'name' | 'profile' | 'judges' | 'clips'>, enqueue: boolean): Job {
+  function newEvaluation(input: Pick<Job, 'name' | 'profile' | 'judges' | 'clips' | 'autoRetry'>, enqueue: boolean): Job {
     return {
       ...input, id: randomUUID(), createdAt: new Date().toISOString(), status: enqueue ? 'queued' : 'running',
       profile: { ...input.profile, rubric: input.profile.rubric ?? structuredClone(DEFAULT_RUBRIC) },
       rubric: RUBRIC_VERSION,
+      autoRetry: input.autoRetry ?? true,
       results: input.clips.flatMap(clip => input.judges.map(judge => ({ clipId: clip.id, judgeId: judge.id, status: 'pending' }))),
     };
   }
@@ -424,6 +455,15 @@ export async function createApp(options: {
       delete job.retrySelection;
       await store.saveJob({ ...job, status });
       job.status = status;
+      if (status === 'completed' && job.autoRetry) {
+        const remaining = unassessedResults(job);
+        if (remaining.length) {
+          prepareRetry(job, remaining);
+          job.autoRetryCount = (job.autoRetryCount ?? 0) + 1;
+          job.status = 'queued';
+          await enqueueEvaluation(job);
+        }
+      }
     } catch (error) {
       runtimeError = `Evaluation interrupted: ${connection.redact(error)}`;
       console.error(runtimeError);
@@ -461,7 +501,7 @@ export async function createApp(options: {
       if (!input.enqueue && (active || dispatching || queuedWrites || waiting.length)) {
         res.status(409).json({ error: 'Another evaluation is running or queued. Add this test to the queue instead.' }); return;
       }
-      const job = newEvaluation({ name: input.name, profile: input.profile, judges: settings.judges, clips }, !!input.enqueue);
+      const job = newEvaluation({ name: input.name, profile: input.profile, judges: settings.judges, clips, autoRetry: input.autoRetry }, !!input.enqueue);
       if (input.enqueue) {
         await enqueueEvaluation(job);
         res.status(201).json(job);
@@ -487,6 +527,7 @@ export async function createApp(options: {
       const original = structuredClone(job);
       changingJobs.add(id);
       job.status = 'cancelled';
+      job.autoRetry = false; delete job.retryAfter;
       for (const result of evaluationResults(job)) {
         result.status = 'cancelled'; result.error = 'Cancelled before the queued test started.';
       }
@@ -499,12 +540,13 @@ export async function createApp(options: {
       return;
     }
     if (!active || active.job.id !== id) { res.status(409).json({ error: 'This evaluation is not running.' }); return; }
+    active.job.autoRetry = false;
     active.controller.abort(); res.json({ status: 'cancelling' });
   });
   app.post(['/api/jobs/:id/resume', '/api/jobs/:id/retry'], async (req, res) => {
     const enqueue = req.path.endsWith('/retry');
     const input = z.object({
-      consent: z.literal(true), retryAudioIssues: z.boolean().optional(), retryUnassessed: z.boolean().optional(), singleSpeakerFallback: z.literal(true).optional(), file: z.string().min(1).optional(),
+      consent: z.literal(true), retryAudioIssues: z.boolean().optional(), retryUnassessed: z.boolean().optional(), singleSpeakerFallback: z.literal(true).optional(), file: z.string().min(1).optional(), autoRetry: z.boolean().optional(),
     }).strict().refine(value => !(value.retryAudioIssues && value.retryUnassessed), 'Choose one retry mode.')
       .refine(value => !value.file || value.retryUnassessed, 'A file can only be selected when retrying unassessed inputs.').parse(req.body);
     const { retryAudioIssues, singleSpeakerFallback, file } = input;
@@ -525,8 +567,7 @@ export async function createApp(options: {
         res.status(404).json({ error: 'The selected file does not belong to this evaluation.' }); return;
       }
       const selected: JudgeResult[] = retryUnassessed
-        ? unassessedInputs(job).filter(input => !file || input.clip.file === file)
-          .flatMap(input => input.judges.map<JudgeResult>(({ judge, result }) => result ?? { clipId: input.clip.id, judgeId: judge.id, status: 'pending' }))
+        ? unassessedResults(job, file)
         : job.results.filter(r => retryAudioIssues ? retryableAudioIssue(r) : r.status !== 'completed');
       if (!selected.length) {
         res.status(409).json({ error: retryUnassessed ? 'No unassessed inputs remain for this selection.' : retryAudioIssues ? 'No completed assessments report a retryable missing-audio claim.' : 'All judge assessments have already completed.' }); return;
@@ -537,14 +578,9 @@ export async function createApp(options: {
         }
       if (!enqueue && (active || dispatching || queuedWrites || waiting.length)) { res.status(409).json({ error: 'Another evaluation is running or queued. Wait for the queue to finish.' }); return; }
       if (singleSpeakerFallback) job.profile = { ...job.profile, singleSpeakerFallback: true };
-      for (const r of selected) {
-        if (job.results.includes(r)) {
-          const { clipId: _clipId, judgeId: _judgeId, previousEvaluations, ...evaluation } = r;
-          r.previousEvaluations = [...(previousEvaluations ?? []), { ...evaluation, retriedAt: new Date().toISOString() }];
-        } else job.results.push(r);
-        r.status = 'pending'; delete r.error; delete r.assessment; delete r.model; delete r.responseFormat; delete r.audioDiagnostics;
-      }
-      job.retrySelection = selected.map(({ clipId, judgeId }) => ({ clipId, judgeId }));
+      job.autoRetry = input.autoRetry ?? true;
+      delete job.retryAfter;
+      prepareRetry(job, selected);
       if (enqueue) {
         job.status = 'queued';
         await enqueueEvaluation(job);

@@ -134,7 +134,7 @@ export function voiceDirectorBriefs(job: Job): VoiceDirectorBrief[] {
       const first = source.cases[0];
       return {
         dimension: source.dimension, title: w(exercise.title),
-        direction: first ? `In ${first.recording} (${first.start}-${first.end}s), at ${first.cue}: ${first.direction}`
+        direction: first ? `In ${first.recording} (${first.start}-${first.end}s), at ${first.cue}: ${first.observation} Next take: ${first.direction} Pass check: ${first.check}`
           : source.feedback.length
             ? `In ${source.feedback[0].recording} (${source.feedback[0].start}-${source.feedback[0].end}s), the feedback reports: ${source.feedback[0].observation} Replay this excerpt and locate the moment before choosing an adjustment; the saved review contains no exact direction.`
             : w('The saved review contains no usable recording-specific direction for this area. Request a new evaluation before prescribing an exact change.'),

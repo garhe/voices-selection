@@ -55,8 +55,9 @@ test('UI connection API applies settings without restart, hides keys and tests e
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const tested: string[] = [];
   let evaluated = false;
-  const { app, errors } = await createApp({
+  const { app, errors, cancelActive } = await createApp({
     dataDir: root, port: address.port,
+    deployments: 'first,second',
     testConnection: async options => {
       assert.equal(options.endpoint, 'https://ui.openai.azure.com');
       assert.equal(options.key, 'ui-test-placeholder');
@@ -68,7 +69,8 @@ test('UI connection API applies settings without restart, hides keys and tests e
       evaluated = true;
       assert.equal(options.endpoint, 'https://ui.openai.azure.com');
       assert.equal(options.key, 'ui-test-placeholder');
-      return { assessment: assessment() };
+      const value = assessment(); value.scores.contextFit = 4;
+      return { assessment: value };
     },
   });
   app.use(errors); server.on('request', app);
@@ -103,17 +105,20 @@ test('UI connection API applies settings without restart, hides keys and tests e
       pcm: Buffer.alloc(48000).toString('base64'),
     });
     const started = await (await request('/api/jobs', { name: 'Connection test', profile: { ...profile, target: 'Warm delivery' }, clipIds: [id], consent: true })).json() as Job;
+    let finished: Job | undefined;
     for (let n = 0; n < 100; n++) {
       const current = await (await request(`/api/jobs/${started.id}`)).json() as Job;
       assert.equal(JSON.stringify(current).includes('ui-test-placeholder'), false);
-      if (current.status !== 'running') break;
+      if (current.status === 'completed') { finished = current; break; }
       await new Promise(resolve => setTimeout(resolve, 5));
     }
+    assert.ok(finished, 'The fixture must finish with assessable ratings rather than requeue indefinitely.');
     assert.equal(evaluated, true);
     const removed = await (await request('/api/connection', {}, 'DELETE')).json();
     assert.equal(removed.configured, false);
     assert.equal((await request('/api/connection/test', { judges: draftJudges })).status, 400);
   } finally {
+    cancelActive();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }

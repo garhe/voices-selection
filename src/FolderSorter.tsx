@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { parseSortingPaths, type SortingPreview, type SortingRequest, type SortingResults } from '../shared/sorting';
-import { ConfirmationDialog } from './ConfirmationDialog';
 
 export function FolderSorter({ busy, onAction, onPreview, onApply }: {
   busy: boolean;
@@ -9,23 +8,21 @@ export function FolderSorter({ busy, onAction, onPreview, onApply }: {
   onApply: (token: string) => Promise<SortingResults>;
 }) {
   const [paths, setPaths] = useState('');
-  const [mode, setMode] = useState<SortingRequest['mode']>('keep');
+  const [mode, setMode] = useState<SortingRequest['mode']>('replace');
   const [outputDirectory, setOutputDirectory] = useState('');
-  const [nameFormat, setNameFormat] = useState('{name}_sorted');
+  const [nameFormat, setNameFormat] = useState('{name}');
   const [preview, setPreview] = useState<SortingPreview>();
   const [results, setResults] = useState<SortingResults>();
-  const [confirm, setConfirm] = useState(false);
-  const [permission, setPermission] = useState(false);
   const selectedPaths = parseSortingPaths(paths);
   const ready = preview?.entries.filter(entry => entry.plan) ?? [];
   function invalidate() {
-    setPreview(undefined); setResults(undefined); setConfirm(false);
+    setPreview(undefined); setResults(undefined);
   }
   function applyPreview() {
     if (!preview) return;
     const token = preview.token;
     const replacing = preview.mode === 'replace';
-    setConfirm(false); setPreview(undefined);
+    setPreview(undefined);
     void onAction(replacing ? 'Replacing voice collections' : 'Copying sorted voice collections', async () => setResults(await onApply(token)));
   }
   return <section className="folder-sorting" aria-label="Folder sorting">
@@ -67,20 +64,10 @@ export function FolderSorter({ busy, onAction, onPreview, onApply }: {
           <details><summary>Show planned output</summary><ul className="sorting-mappings">{entry.plan.mappings.map(mapping => <li key={mapping.destination}><span>{mapping.source}</span><strong>{mapping.destination}</strong></li>)}</ul></details>
         </>}
       </article>)}
-      <button className={`secondary${preview.mode === 'replace' ? ' danger' : ''}`} disabled={busy || !ready.length || Date.parse(preview.expiresAt) <= Date.now()} onClick={() => {
-        if (preview.mode === 'replace') { setPermission(false); setConfirm(true); }
-        else applyPreview();
-      }}>
-        {preview.mode === 'replace' ? `Replace ${ready.length} original collection${ready.length === 1 ? '' : 's'}…` : `Create ${ready.length} sorted ${ready.length === 1 ? 'copy' : 'copies'}`}
+      <button className={`secondary${preview.mode === 'replace' ? ' danger' : ''}`} disabled={busy || !ready.length || Date.parse(preview.expiresAt) <= Date.now()} onClick={applyPreview}>
+        {preview.mode === 'replace' ? `Replace ${ready.length} original collection${ready.length === 1 ? '' : 's'}` : `Create ${ready.length} sorted ${ready.length === 1 ? 'copy' : 'copies'}`}
       </button>
     </div>}
-    {confirm && preview && <ConfirmationDialog title="Permanently replace these collections?"
-      description="Only the valid directories listed below will be replaced. Sorted WAV files will be installed at the listed output paths. Original contents, including non-WAV files, will then be permanently deleted. This cannot be undone."
-      busy={busy} onCancel={() => setConfirm(false)}>
-      <ul className="test-bulk-list">{ready.map(entry => <li key={entry.source}>{entry.source} → {entry.output} · {entry.plan!.omittedFiles} non-WAV files deleted</li>)}</ul>
-      <label className="checkbox-label"><input type="checkbox" checked={permission} disabled={busy} onChange={event => setPermission(event.target.checked)} /> I have a backup and confirm permanent replacement of these original folders.</label>
-      <div className="button-row"><button className="secondary danger" disabled={busy || !permission} onClick={applyPreview}>Confirm replacement</button><button className="secondary" data-dialog-cancel="" disabled={busy} onClick={() => setConfirm(false)}>Cancel</button></div>
-    </ConfirmationDialog>}
     {results && <div className="card" role="region" aria-label="Folder sorting results"><h2>Sorting results</h2>
       <p role="status">{results.entries.filter(entry => entry.output).length} {results.mode === 'replace' ? 'replaced' : 'copied; originals kept'} · {results.entries.filter(entry => entry.error).length} failed</p>
       {results.entries.map(entry => <article key={entry.source} className="sorting-entry"><h3>{entry.source}</h3>

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { applyLanguageHint, displayLanguageHint, evaluationBlockers, newTestProfile, rubricHasChanges, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
+import { appendJudge, applyLanguageHint, displayLanguageHint, evaluationBlockers, newTestProfile, rubricHasChanges, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, withSpeakerScope, withRubric } from '../src/readiness.js';
 import { activeDimensions, eligibleScore, profileSchema, rubricSchema, mediaText, DEFAULT_RUBRIC, BOTH_SPEAKERS_TEST_GUIDE, type Rubric } from '../shared/domain.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -24,6 +24,30 @@ test('default judge order is natural by name and preserves IDs, deployments and 
     { id: randomUUID(), name: 'Custom Reviewer', deployment: 'second' },
   ];
   assert.deepEqual(sortJudges(duplicates), duplicates, 'Equal names retain their original order.');
+});
+
+test('adding judges to an edited panel fills the first five defaults and leaves judge six onward blank', () => {
+  const original = [1, 2, 3].map(number => ({ id: randomUUID(), name: `Custom judge ${number}`, deployment: `custom-${number}` }));
+  const snapshot = structuredClone(original);
+  const four = appendJudge(original);
+  assert.equal(four[3].name, 'Judge 4');
+  assert.equal(four[3].deployment, 'gpt-realtime-2.1-mini');
+  const five = appendJudge(four);
+  assert.equal(five[4].name, 'Judge 5');
+  assert.equal(five[4].deployment, 'gpt-realtime-2.1');
+  const six = appendJudge(five);
+  assert.equal(six[5].name, 'Judge 6');
+  assert.equal(six[5].deployment, '');
+  const seven = appendJudge(six);
+  assert.equal(seven[6].deployment, '');
+  assert.equal(new Set(seven.map(judge => judge.id)).size, 7);
+  assert.deepEqual(original, snapshot);
+  assert.deepEqual(seven.slice(0, 3), snapshot, 'Existing custom names and deployments must not be overwritten.');
+  assert.equal(four.length, 4);
+  assert.equal(five.length, 5);
+  assert.equal(appendJudge([])[0].deployment, 'gpt-realtime-1.5');
+  assert.equal(appendJudge(original.slice(0, 1))[1].deployment, 'gpt-realtime');
+  assert.equal(appendJudge(original.slice(0, 2))[2].deployment, 'gpt-realtime-mini');
 });
 
 test('fresh tests load an independent saved default rubric, including after a custom test', () => {

@@ -89,6 +89,8 @@ test('director cases give different voices exact cues and adjustments even with 
     assert.equal(brief.focus[0].cases.length, 1, 'identical panel cases are deduplicated');
     assert.ok(brief.summary.includes(value.name));
     assert.ok(brief.summary.includes(cases[index].direction));
+    assert.ok(brief.summary.includes(cases[index].observation));
+    assert.ok(brief.summary.includes(cases[index].check));
     assert.ok(brief.takePlan[1].includes(cases[index].cue));
     assert.ok(brief.takePlan[2].includes(cases[index].check));
     const text = formatDirectorBrief(brief);
@@ -638,6 +640,39 @@ test('voice evidence groups repeated comments by recording, not windows, and pre
   assert.equal(evidence.judges[1].dimensions.find(d => d.dimension === 'naturalness')!.score, 2);
   assert.equal(evidence.judges[0].dimensions.find(d => d.dimension === 'audioQuality')!.diagnostic, true);
   assert.equal(evidence.judges[0].gaps.length, 0);
+});
+
+test('improvement evidence preserves defects, cues, adjustments, pass checks and exact source windows per judge', () => {
+  const value = job([clip({ start: 10, end: 25 }), clip({ start: 25, end: 40 })], [4.5, 4]);
+  const item = {
+    dimension: 'pace' as const, cue: 'the final breath group',
+    observation: 'The ending rushes and the final syllables become hard to catch.',
+    direction: 'Release the last two syllables before taking a breath.',
+    check: 'The final syllables stay distinct without slowing the opening.',
+  };
+  for (const result of value.results.filter(r => r.judgeId === value.judges[0].id))
+    result.assessment!.rehearsalCases = [item, item, { ...item, dimension: 'accentFit' }];
+  const snapshot = JSON.stringify(value);
+  const evidence = summarizeVoiceEvidence(value)[0];
+  const cases = evidence.judges[0].dimensions.find(d => d.dimension === 'pace')!.improvements;
+  assert.equal(cases.length, 2, 'duplicates are grouped, but distinct windows remain locatable');
+  for (const note of cases) {
+    for (const part of [item.cue, item.observation, item.direction, item.check]) assert.ok(note.text.includes(part));
+    assert.deepEqual(note.files, [value.clips[0].file]);
+  }
+  assert.ok(cases.some(note => note.text.includes('Excerpt 10-25s')));
+  assert.ok(cases.some(note => note.text.includes('Excerpt 25-40s')));
+  assert.ok(evidence.judges[1].dimensions.every(d => d.improvements.length === 0));
+  assert.equal(evidence.judges[0].dimensions.some(d => d.dimension === 'accentFit'), false);
+  assert.equal(JSON.stringify(value), snapshot, 'saved scores and feedback are not rewritten');
+
+  value.results[0].status = 'failed';
+  value.results[2].assessment!.languageSupported = false;
+  assert.ok(summarizeVoiceEvidence(value)[0].judges[0].dimensions.every(d => d.improvements.length === 0));
+  value.results[2].assessment!.languageSupported = true;
+  value.profile = { ...profile, speakerMode: 'automatic' };
+  value.results[2].assessment!.speakerAttribution = { role: 'speaker', status: 'uncertain', evidence: 'Overlapping speakers.' };
+  assert.ok(summarizeVoiceEvidence(value)[0].judges[0].dimensions.every(d => d.improvements.length === 0));
 });
 
 test('missing target-style ratings are explained without inventing scores or discarding other judge comments', () => {

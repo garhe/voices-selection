@@ -1,4 +1,4 @@
-import { clipSchema, clipScopeError, settingsSchema, profileSchema, testNameSchema, rolesForScope, profileRubric, mediaText, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Judge, type Profile, type Settings, type Rubric } from '../shared/domain';
+import { clipSchema, clipScopeError, settingsSchema, profileSchema, testNameSchema, rolesForScope, profileRubric, mediaText, MAX_SECONDS, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE, type DraftClip, type Judge, type Profile, type Settings, type Rubric } from '../shared/domain';
 import type { Recording } from './audio';
 import { testNameMetadata } from '../shared/history';
 
@@ -6,6 +6,13 @@ export { DEFAULT_TEST_GUIDE, SINGLE_SPEAKER_TEST_GUIDE, BOTH_SPEAKERS_TEST_GUIDE
 
 export function sortJudges(judges: readonly Judge[]): Judge[] {
   return [...judges].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+export function appendJudge(judges: readonly Judge[]): Judge[] {
+  return [...judges, {
+    id: crypto.randomUUID(), name: `Judge ${judges.length + 1}`,
+    deployment: DEFAULT_JUDGE_DEPLOYMENTS[judges.length] ?? '',
+  }];
 }
 
 export function rubricHasChanges(rubric: Rubric, stored?: Rubric): boolean {

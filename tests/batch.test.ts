@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm, symlink, truncate } from 'node:fs/promises';
 import os from 'node:os';
@@ -236,6 +237,14 @@ test('batch wizard initially requires shared settings and does not ask for a sin
   assert.doesNotMatch(html, /Batch parent directory<input/);
 });
 
+test('batch submission has no Azure-rights checkbox but retains the usage notice and validation', () => {
+  const source = readFileSync(new URL('../src/BatchEvaluation.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /setConsent|checked=\{consent\}|!consent|I have permission/);
+  assert.match(source, /No separate permission confirmation is required/);
+  assert.match(source, /usage charges for every test, judge and automatic retry/);
+  assert.match(source, /disabled=\{busy \|\| !settingsReady \|\| !pending\.length \|\| pending\.some/);
+});
+
 test('locale-dependent rubric readiness is checked per folder, not before directory selection', () => {
   const profile = newTestProfile();
   profile.rubric!.dimensions = profile.rubric!.dimensions.map(dimension => ({
@@ -268,7 +277,10 @@ test('local batch audio goes through normal saved jobs, FIFO queue and report hi
     evaluate: async input => {
       maximum = Math.max(maximum, ++concurrent); languages.push(input.profile.language);
       await new Promise(resolve => setTimeout(resolve, 5)); concurrent--;
-      return { assessment: assessment() };
+      const result = assessment();
+      result.scores.contextFit = 4; result.scores.accentFit = 4;
+      result.speakerAttribution = { role: 'agent', status: 'identified', evidence: 'The agent offers help.' };
+      return { assessment: result };
     },
   });
   backend.app.use(backend.errors); server.on('request', backend.app);

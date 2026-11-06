@@ -4,7 +4,7 @@ import {
   dimensions, dimensionLabel, dimensionWeight, profileRubric, type Rubric, RUBRIC_VERSION, summarize, summarizeVoiceEvidence, assessmentGaps, eligibleScore, eligibleWeightedScore, WEIGHTED_PREFERENCE, retryableAudioIssue, unassessedInputs, mediaText, singleSpeakerFallbackCount, MAX_SECONDS, activeDimensions, evaluationName, testNameSchema, resolveLanguageHint, rolesForScope, testType,
 } from '../shared/domain';
 import { browserWav, decode, toPcm, validateRegion, type Recording, type Region } from './audio';
-import { applyLanguageHint, displayLanguageHint, newTestProfile, evaluationBlockers, inputCount, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric } from './readiness';
+import { appendJudge, applyLanguageHint, displayLanguageHint, newTestProfile, evaluationBlockers, inputCount, recordingReviewed, sortJudges, withLanguageAccent, withTestNameLanguage, withSpeakerScope, withRubric } from './readiness';
 import { voiceDirectorBriefs, formatDirectorBrief, type VoiceDirectorBrief } from '../shared/coaching';
 import { canManageTest, canRetryUnassessedTest, testHistory, testMetadataSchema, testNameMetadata, testStatusLabel, testTableCsv, TEST_PAGE_SIZE, type BulkTestAction, type BulkTestResult, type TestHistory } from '../shared/history';
 import { csvCell } from '../shared/csv';
@@ -107,12 +107,20 @@ function exportVoiceEvidenceCsv(job: Job) {
     for (const dimension of evidence.dimensions) {
       row('dimension_summary', undefined, dimension.dimension, dimension.score, dimension.diagnostic);
       for (const note of dimension.reasons) row('dimension_evidence', note, dimension.dimension, dimension.score, dimension.diagnostic);
+      for (const note of dimension.improvements) row('dimension_improvement', note, dimension.dimension, dimension.score, dimension.diagnostic);
     }
   }
   download(`voice-evidence-${job.id}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
 }
 function EvidenceList({ notes, stage = 'audition' }: { notes: EvidenceNote[]; stage?: Profile['stage'] }) {
   return <ul>{notes.map(note => <li key={note.text}>{note.text}<small className="evidence-files">{mediaText(`${note.files.length} recording${note.files.length === 1 ? '' : 's'}`, stage)} · {note.files.join(' · ')}</small></li>)}</ul>;
+}
+function ImprovementEvidence({ judge, profile, dimension }: { judge: VoiceEvidence['judges'][number]; profile: Profile; dimension?: Dimension }) {
+  const areas = judge.dimensions.filter(d => (!dimension || d.dimension === dimension) && d.improvements.length);
+  return areas.length ? <>{areas.map(d => <div key={d.dimension}>
+    <h4>{dimensionLabel(profile, d.dimension)}: defects &amp; improvements</h4>
+    <EvidenceList notes={d.improvements} stage={profile.stage} />
+  </div>)}</> : <p className="hint">No specific defect / adjustment case was saved{dimension ? ' for this dimension' : ''}. This does not establish a perfect performance. Check the original reasons and limitations; run a new evaluation for explicit defect, cue, adjustment and pass-check feedback.</p>;
 }
 function exportVoiceMatrixCsv(job: Job) {
   const notes = (values: EvidenceNote[]) => values.length ? values.map(note =>
@@ -127,6 +135,7 @@ function exportVoiceMatrixCsv(job: Job) {
       `Single-judge preference (1-5): ${score(judge.score)}`,
       `Single-judge weighted preference (1-5): ${score(judge.weightedScore)}`,
       `${mediaText('Scored recordings', job.profile.stage)}: ${judge.scoredFiles}/${voice.files}`,
+      `DEFECTS & IMPROVEMENTS:\n${judge.dimensions.map(d => `${dimensionLabel(job.profile, d.dimension)}:\n${notes(d.improvements)}`).join('\n\n')}`,
       `OVERALL COMMENTS:\n${notes(judge.observations)}`,
       `LIMITATIONS:\n${notes(judge.limitations)}`,
       `SCORING GAPS:\n${notes(judge.gaps)}`,
@@ -154,12 +163,13 @@ function VoiceJudgeMatrix({ job, voices }: { job: Job; voices: VoiceEvidence[] }
             <p><strong>{score(judge.score)}{judge.score !== null && ' / 5'}</strong><small>Single-judge preference · {judge.scoredFiles}/{voice.files} {w('recordings scored')}</small></p>
             <p><strong>{score(judge.weightedScore)}{judge.weightedScore !== null && ' / 5'}</strong><small>Single-judge Weighted Preference</small></p>
             <h3>Overall comments</h3>
+            <ImprovementEvidence judge={judge} profile={job.profile} />
             {judge.observations.length ? <EvidenceList notes={judge.observations.slice(0, 2)} stage={job.profile.stage} /> : <p>No overall comments recorded.</p>}
             {judge.observations.length > 2 && <details><summary>More overall comments ({judge.observations.length - 2})</summary><EvidenceList notes={judge.observations.slice(2)} stage={job.profile.stage} /></details>}
             <details><summary>Limitations ({judge.limitations.length})</summary>{judge.limitations.length ? <EvidenceList notes={judge.limitations} stage={job.profile.stage} /> : <p>No limitations recorded.</p>}</details>
             <details open={judge.gaps.length > 0}><summary>Scoring gaps ({judge.gaps.length})</summary>{judge.gaps.length ? <EvidenceList notes={judge.gaps} stage={job.profile.stage} /> : <p>No scoring gaps reported.</p>}</details>
             <h3>Dimension ratings</h3><ul className="matrix-ratings">{judge.dimensions.map(d => <li key={d.dimension}>{dimensionLabel(job.profile, d.dimension)}: <strong>{score(d.score)}</strong>{d.diagnostic && <small>Diagnostic only; excluded from preference</small>}</li>)}</ul>
-            <details><summary>Why these ratings</summary>{judge.dimensions.map(d => <div key={d.dimension}><h4>{dimensionLabel(job.profile, d.dimension)} · {score(d.score)}{d.diagnostic && ' (diagnostic only)'}</h4>{d.reasons.length ? <EvidenceList notes={d.reasons} stage={job.profile.stage} /> : <p>No scored evidence available; check scoring gaps.</p>}</div>)}</details>
+            <details><summary>Why these ratings / what to improve</summary>{judge.dimensions.map(d => <div key={d.dimension}><h4>{dimensionLabel(job.profile, d.dimension)} · {score(d.score)}{d.diagnostic && ' (diagnostic only)'}</h4><ImprovementEvidence judge={judge} profile={job.profile} dimension={d.dimension} />{d.reasons.length ? <EvidenceList notes={d.reasons} stage={job.profile.stage} /> : <p>No scored evidence available; check scoring gaps.</p>}</div>)}</details>
           </td>)}
         </tr>)}
           {!voices.length && <tr><td colSpan={job.judges.length + 3}>{w('No recording evidence is available yet.')}</td></tr>}
@@ -204,8 +214,8 @@ function VoiceImprovement({ job, voices }: { job: Job; voices: VoiceDirectorBrie
         {focus.cases.map((item, caseIndex) => <div className="callout" key={caseIndex}>
           <h4>Case {caseIndex + 1}: {item.recording} ({item.start}-{item.end}s excerpt)</h4>
           <p><strong>Find:</strong> {item.cue}</p>
-          <p><strong>Heard:</strong> {item.observation}</p>
-          <p><strong>Do:</strong> {item.direction}</p>
+          <p><strong>Defect heard / listener impact:</strong> {item.observation}</p>
+          <p><strong>Improve:</strong> {item.direction}</p>
           <p><strong>Pass check:</strong> {item.check}</p>
         </div>)}
         {focus.feedback.length > 0 && <div className="callout">
@@ -449,14 +459,17 @@ export function App() {
   function beginNewEvaluation() {
     if (tab === 'setup') return;
     if (tab === 'sorting') { setTab('setup'); return; }
-    const source = job?.profile ?? profile;
-    setProfile(newTestProfile(source));
-    if (job) setConfig(previous => previous ? { ...previous, judges: sortJudges(job.judges).map(judge => ({ ...judge })) } : previous);
-    setTestName(''); setRecords([]); setSavedClips(undefined); setDraftSource(undefined);
-    setSelected(undefined); setBuffer(undefined); setSourceUrl(''); setPreviewUrl('');
-    setConfirmDelete(undefined); setTab('setup');
-    setEditingTest(undefined);
-    setNotice('New test draft ready with the built-in default rubric. Other evaluation settings are kept; recordings are cleared. Enter a test name and select or drop a folder. Saved results are unchanged.');
+    void action('Preparing new evaluation', async () => {
+      const configuration = await api<Config>('/api/config');
+      setConfig({ ...configuration, judges: sortJudges(configuration.judges) });
+      const source = job?.profile ?? profile;
+      setProfile(newTestProfile(source));
+      setTestName(''); setRecords([]); setSavedClips(undefined); setDraftSource(undefined);
+      setSelected(undefined); setBuffer(undefined); setSourceUrl(''); setPreviewUrl('');
+      setConfirmDelete(undefined); setTab('setup');
+      setEditingTest(undefined);
+      setNotice('New test draft ready with the built-in default rubric and saved default judging panel. Other evaluation settings are kept; recordings are cleared. Enter a test name and select or drop a folder. Saved results are unchanged.');
+    });
   }
   function updateLanguageAccent(language: string) {
     setProfile(previous => withLanguageAccent(previous, language));
@@ -805,11 +818,13 @@ export function App() {
                 <label>Azure deployment name<input value={judge.deployment} maxLength={120} disabled={!!busy} onChange={e => setConfig({ ...config, judges: config.judges.map(j => j.id === judge.id ? { ...j, deployment: e.target.value } : j) })} /></label></div>
               <button className="icon-button" aria-label={`Remove ${judge.name}`} disabled={!!busy || config.judges.length === 1} onClick={() => setConfig({ ...config, judges: config.judges.filter(j => j.id !== judge.id) })}>×</button>
             </div>)}
-            <div className="button-row"><button className="secondary" disabled={!!busy || !config} onClick={() => config && setConfig({ ...config, judges: [...config.judges, { id: crypto.randomUUID(), name: `Judge ${config.judges.length + 1}`, deployment: '' }] })}>+ Add judge</button>
+            <div className="button-row"><button className="secondary" disabled={!!busy || !config} onClick={() => setConfig(previous => previous ? { ...previous, judges: appendJudge(previous.judges) } : previous)}>+ Add judge</button>
               <button className="text-button" disabled={!config || !!busy} onClick={() => void action('Saving panel', async () => {
                 await api('/api/settings', { judges: config?.judges }, 'PUT'); await refresh();
-              })}>Save panel</button></div>
+                setNotice('Judging panel saved as the default for new evaluations. Existing tests keep their original panel.');
+              })}>Save panel as default</button></div>
             <p className="hint">No fixed judge limit. Each added judge increases Azure usage and concurrent requests; deployment quotas still apply. Use actual deployment names, not display names. Related models can share biases; agreement is not a confidence guarantee.</p>
+            <p className="hint">New tests automatically retry incomplete assessments without an attempt limit, using the same panel and original criteria. Retries incur Azure usage; use the queue pause or cancel controls to stop them.</p>
           </div></details>
         {setupMode === 'batch' ? <BatchEvaluation profile={{ ...profile, speakerMode: 'automatic' }} config={config} busy={!!busy} onAction={action}
           onPreview={request => api<BatchPreview>('/api/batch/preview', request)}
@@ -982,6 +997,8 @@ export function App() {
               {voice.judges.map(evidence => {
                 const judge = job.judges.find(j => j.id === evidence.judgeId)!;
                 return <article key={evidence.judgeId}><h3>{judge.name}</h3><p className="hint">{judge.deployment} · {evidence.scoredFiles}/{voice.files} files scored by this judge. {reportText('A full-panel recording still requires every judge.')}</p>
+                  <h4>Defects found &amp; what to improve</h4>
+                  <ImprovementEvidence judge={evidence} profile={job.profile} />
                   <h4>Scoring gaps and role / language limitations</h4>
                   {evidence.gaps.length ? <EvidenceList notes={evidence.gaps} stage={job.profile.stage} /> : <p>No scoring gaps reported.</p>}
                   <details><summary>Reported observations ({evidence.observations.length} distinct comments)</summary>{evidence.observations.length ? <EvidenceList notes={evidence.observations} stage={job.profile.stage} /> : <p>No observations recorded.</p>}</details>

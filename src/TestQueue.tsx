@@ -16,10 +16,14 @@ export function TestQueue({ state, busy, onPause, onStart, onCancel }: {
       </div>
     </div>
     {state.error && <p className="error-text" role="alert">{state.error}</p>}
+    <p className="hint">Incomplete tests immediately rejoin the queue until every input/judge is fully assessable, with no cooldown or attempt limit. Retries run as soon as their queue turn is available, without interrupting another test. Each retry incurs Azure usage and may never resolve a genuine limitation. Successful judgments are kept. Pause the queue or cancel a test to stop further attempts.</p>
+    {!!state.active?.autoRetryCount && <p role="status">Automatic retry {state.active.autoRetryCount} · No attempt limit</p>}
     {state.paused && <p className="hint">The current test can finish; waiting tests will not start. After a server restart, start the saved queue explicitly.</p>}
     {!!state.waiting.length && <details><summary>Waiting tests ({state.waiting.length})</summary>
       <ol>{state.waiting.map(test => <li key={test.id}><div className="test-queue-row"><span title={test.name}>{test.retry ? 'Retry: ' : ''}{test.name}</span>
-        <button className="text-button danger" disabled={busy} aria-label={`Cancel queued test ${test.name}`} onClick={() => onCancel(test.id)}>Cancel</button></div></li>)}</ol>
+        <button className="text-button danger" disabled={busy} aria-label={`Cancel queued test ${test.name}`} onClick={() => onCancel(test.id)}>Cancel</button></div>
+        {!!test.autoRetryCount && <small>Automatic retry {test.autoRetryCount} · Ready for its queue turn</small>}
+      </li>)}</ol>
     </details>}
   </section>;
 }

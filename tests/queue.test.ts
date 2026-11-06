@@ -10,7 +10,7 @@ import { once } from 'node:events';
 import { createApp } from '../server/app.js';
 import { assessment, clip, profile, job as fixtureJob } from './fixtures.js';
 import type { BulkTestResult } from '../shared/history.js';
-import { RUBRIC_VERSION, DEFAULT_RUBRIC, type Job, type TestQueueState } from '../shared/domain.js';
+import { RUBRIC_VERSION, DEFAULT_RUBRIC, DEFAULT_JUDGE_DEPLOYMENTS, unassessedInputs, type Job, type TestQueueState } from '../shared/domain.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TestQueue } from '../src/TestQueue.js';
@@ -28,6 +28,186 @@ function gate() {
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
 }
+
+test('fresh installations default to five judges and saved panels survive restart and environment overrides', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-default-panel-'));
+  try {
+    let backend = await createApp({ dataDir: root });
+    const defaults = await backend.store.settings();
+    assert.deepEqual(defaults.judges.map(judge => judge.deployment), [...DEFAULT_JUDGE_DEPLOYMENTS]);
+    assert.equal(defaults.judges.length, 5);
+    await backend.store.save('settings.json', { judges: defaults.judges.slice(0, 3) });
+    backend.cancelActive();
+    backend = await createApp({ dataDir: root, deployments: 'different-environment-deployment' });
+    assert.deepEqual((await backend.store.settings()).judges, defaults.judges.slice(0, 3));
+    backend.cancelActive();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('automatic retries immediately exceed five attempts without cooldowns and preserve successes until every judge is assessable', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-auto-retries-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const firstGate = gate();
+  const panel = fixtureJob(undefined, [4, 4]).judges;
+  const calls: string[] = [];
+  let affectedCalls = 0, goodCalls = 0;
+  const backend = await createApp({
+    dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    evaluate: async input => {
+      calls.push(input.profile.target);
+      const result = assessment(4.5);
+      result.scores.contextFit = 4;
+      result.speakerAttribution = { role: 'agent', status: 'identified', evidence: 'The agent offers help.' };
+      assert.equal(input.role, 'agent');
+      assert.equal(input.pcm.length, 48000);
+      if (input.profile.target === 'Needs retries') {
+        if (input.judge.id === panel[0].id) goodCalls++;
+        else {
+          affectedCalls++;
+          if (affectedCalls === 1) { await firstGate.promise; throw new Error('Temporary service failure.'); }
+          if (affectedCalls === 2) { result.languageSupported = false; result.assessable = false; }
+          if (affectedCalls === 3) result.speakerAttribution.status = 'uncertain';
+          if (affectedCalls === 4) result.speakerAttribution.status = 'not_present';
+          if (affectedCalls === 5) result.assessable = false;
+          if ([6, 7].includes(affectedCalls)) result.scores.pace = null;
+        }
+      }
+      return { assessment: result, responseFormat: 'function_call' };
+    },
+  });
+  backend.app.use(backend.errors); server.on('request', backend.app);
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: unknown) => fetch(url + route, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const readJob = async (id: string) => await (await fetch(`${url}/api/jobs/${id}`)).json() as Job;
+  const state = async () => await (await fetch(url + '/api/queue')).json() as TestQueueState;
+  const audio = clip({ role: 'agent' }); await backend.store.saveClip(audio, Buffer.alloc(48000));
+  const add = async (target: string) => {
+    const response = await post('/api/jobs', {
+      name: target, profile: { ...profile, target, scope: 'agent', speakerMode: 'automatic' },
+      judges: panel, clipIds: [audio.id], consent: true, enqueue: true,
+    });
+    assert.equal(response.status, 201);
+    return await response.json() as Job;
+  };
+  try {
+    const original = await add('Needs retries');
+    await until(state, value => value.active?.id === original.id);
+    const other = await add('Other test');
+    firstGate.release();
+    await until(state, value => !value.active && !value.waiting.length);
+    const done = await readJob(original.id);
+    assert.equal(done.autoRetry, true);
+    assert.equal(done.status, 'completed');
+    assert.equal(done.autoRetryCount, 7, 'Automatic retries have no five-attempt cap.');
+    assert.equal(affectedCalls, 8);
+    assert.equal(goodCalls, 1, 'The successful judge must never be resubmitted.');
+    assert.equal(unassessedInputs(done).length, 0);
+    assert.equal(done.retrySelection, undefined);
+    assert.equal(done.retryAfter, undefined);
+    assert.equal(done.results[0].previousEvaluations, undefined);
+    assert.equal(done.results[0].assessment!.scores.naturalness, 4.5);
+    const history = done.results[1].previousEvaluations!;
+    assert.equal(history.length, 7);
+    assert.match(history[0].error!, /Temporary service failure/);
+    assert.equal(history[1].assessment!.languageSupported, false);
+    assert.equal(history[2].assessment!.speakerAttribution!.status, 'uncertain');
+    assert.equal(history[3].assessment!.speakerAttribution!.status, 'not_present');
+    assert.equal(history[6].assessment!.scores.pace, null);
+    assert.equal((await readJob(other.id)).status, 'completed');
+    assert.deepEqual(calls, ['Needs retries', 'Needs retries', 'Other test', 'Other test', ...Array(7).fill('Needs retries')],
+      'Retries have no cooldown but must not jump ahead of an already queued test.');
+    assert.deepEqual(await backend.store.read(path.join('jobs', `${done.id}.json`)), done);
+  } finally {
+    firstGate.release(); backend.cancelActive(); server.close(); await once(server, 'close');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('immediate retries remain pausable and cancellable across restart and discard saved cooldowns', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'voice-auto-retry-pause-'));
+  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const firstGate = gate();
+  let calls = 0;
+  const options: Parameters<typeof createApp>[0] = {
+    dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    evaluate: async input => {
+      calls++;
+      const result = assessment(); result.scores.contextFit = 4;
+      if (input.profile.target === 'Cannot assess') {
+        await firstGate.promise;
+        result.languageSupported = false;
+      }
+      return { assessment: result, responseFormat: 'function_call' as const };
+    },
+  };
+  let backend = await createApp(options);
+  server.on('request', (req, res) => backend.app(req, res)); backend.app.use(backend.errors);
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: unknown) => fetch(url + route, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const state = async () => await (await fetch(url + '/api/queue')).json() as TestQueueState;
+  const panel = fixtureJob(undefined, [4]).judges;
+  const audio = clip(); await backend.store.saveClip(audio, Buffer.alloc(48000));
+  const add = async (target: string) => await (await post('/api/jobs', {
+    name: target, profile: { ...profile, target }, judges: panel, clipIds: [audio.id], consent: true, enqueue: true,
+  })).json() as Job;
+  try {
+    const original = await add('Cannot assess');
+    await until(state, value => value.active?.id === original.id);
+    await post('/api/queue/pause', {});
+    const ready = await add('Ready');
+    firstGate.release();
+    const queued = await until(state, value => !value.active && value.waiting.length === 2);
+    assert.deepEqual(queued.waiting.map(job => job.id), [ready.id, original.id]);
+    assert.equal(queued.waiting[1].autoRetryCount, 1);
+    assert.equal(calls, 1, 'Pause prevents the immediately queued retry from starting.');
+    for (const id of [original.id, ready.id]) {
+      const saved = await backend.store.read<Job>(path.join('jobs', `${id}.json`));
+      saved.retryAfter = new Date(Date.now() + 86_400_000).toISOString();
+      await backend.store.saveJob(saved);
+    }
+    backend.cancelActive();
+    backend = await createApp(options); backend.app.use(backend.errors);
+    const restarted = await state();
+    assert.equal(restarted.paused, true);
+    assert.deepEqual(restarted.waiting.map(job => job.id), [ready.id, original.id]);
+    assert.ok(restarted.waiting.every(job => !('retryAfter' in job)));
+    for (const id of [original.id, ready.id])
+      assert.equal((await backend.store.read<Job>(path.join('jobs', `${id}.json`))).retryAfter, undefined,
+        'Legacy cooldowns are removed from saved jobs, not just hidden in the UI.');
+    assert.equal(calls, 1, 'Restart never silently resumes Azure usage.');
+    assert.equal((await post(`/api/jobs/${original.id}/cancel`, {})).status, 200);
+    const stopped = await backend.store.read<Job>(path.join('jobs', `${original.id}.json`));
+    assert.equal(stopped.status, 'cancelled');
+    assert.equal(stopped.autoRetry, false);
+    assert.equal(stopped.results[0].previousEvaluations!.length, 1);
+    await post('/api/queue/start', { consent: true });
+    await until(state, value => !value.active && !value.waiting.length);
+    assert.equal((await backend.store.read<Job>(path.join('jobs', `${ready.id}.json`))).status, 'completed',
+      'Previously delayed jobs start immediately after the saved queue resumes.');
+    assert.equal(calls, 2, 'Cancelling prevents any further automatic attempt.');
+    const legacy = fixtureJob([audio], [4]); legacy.rubric = RUBRIC_VERSION;
+    legacy.results[0].assessment!.assessable = false;
+    await backend.store.saveJob(legacy);
+    backend.cancelActive();
+    backend = await createApp(options); backend.app.use(backend.errors);
+    assert.equal((await state()).waiting.length, 0, 'Older completed tests are not silently opted into unlimited paid retries.');
+    legacy.autoRetry = true; legacy.status = 'interrupted';
+    await backend.store.saveJob(legacy);
+    backend.cancelActive();
+    backend = await createApp(options); backend.app.use(backend.errors);
+    assert.equal((await state()).paused, true);
+    assert.equal((await state()).waiting[0].id, legacy.id, 'An opted-in interrupted test is restored to the paused queue.');
+  } finally {
+    firstGate.release(); backend.cancelActive(); server.close(); await once(server, 'close');
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('targeted retries join the FIFO queue, preserve other judgments, and allow one pending retry per test', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-queued-retry-'));
@@ -93,7 +273,7 @@ test('targeted retries join the FIFO queue, preserve other judgments, and allow 
     const first = await addNormal('Active');
     await until(state, value => value.active?.id === first.id);
     const responses = await Promise.all([0, 1].map(() => post(`/api/jobs/${a.id}/retry`, {
-      consent: true, retryUnassessed: true, singleSpeakerFallback: true, file: clips[0].file,
+      consent: true, retryUnassessed: true, singleSpeakerFallback: true, file: clips[0].file, autoRetry: false,
     })));
     assert.deepEqual(responses.map(response => response.status).sort(), [202, 409]);
     const normal = await addNormal('Normal');
@@ -158,7 +338,7 @@ test('queued retry selections survive cancellation failures and restart without 
   original.results[2].status = 'failed'; original.results[2].error = 'Unselected failure.'; delete original.results[2].assessment;
   for (const saved of clips) await backend.store.saveClip(saved, Buffer.alloc(48000));
   await backend.store.saveJob(original);
-  const retry = () => post(`/api/jobs/${original.id}/retry`, { consent: true, retryUnassessed: true, file: clips[0].file });
+  const retry = () => post(`/api/jobs/${original.id}/retry`, { consent: true, retryUnassessed: true, file: clips[0].file, autoRetry: false });
   try {
     await post('/api/queue/pause', {});
     assert.equal((await retry()).status, 202);
@@ -209,7 +389,8 @@ test('queued tests run FIFO with saved inputs, continue after failures, and supp
       try {
         if (input.profile.target === 'First') await firstGate.promise;
         if (input.profile.target === 'Fails') throw new Error('Synthetic judge failure');
-        return { assessment: assessment(), responseFormat: 'function_call' };
+        const result = assessment(); result.scores.contextFit = 4;
+        return { assessment: result, responseFormat: 'function_call' };
       } finally { inFlight--; }
     },
   });
@@ -224,7 +405,7 @@ test('queued tests run FIFO with saved inputs, continue after failures, and supp
   await backend.store.saveClip(saved, Buffer.alloc(48000));
   const input = (target: string) => ({
     name: `${target} en-GB Male`, profile: { ...profile, target }, clipIds: [saved.id], consent: true,
-    enqueue: true, judges: [judge],
+    enqueue: true, judges: [judge], autoRetry: false,
   });
   const add = async (target: string) => {
     const response = await request('/api/jobs', input(target));
@@ -320,6 +501,13 @@ test('queue panel stays compact and exposes ordered waiting tests, cancellation 
   }));
   assert.equal(render({ paused: false, waiting: [] }), '');
   const html = render({ paused: false, active: { id: 'active', name: 'Current' }, waiting: [{ id: 'next', name: 'Next' }] });
+  assert.match(html, /no cooldown or attempt limit/);
+  assert.match(html, /may never resolve a genuine limitation/);
+  const retryHtml = render({ paused: false, waiting: [{ id: 'next', name: 'Next', retry: true, autoRetryCount: 6 }] });
+  assert.match(retryHtml, /Automatic retry 6/);
+  assert.match(retryHtml, /Ready for its queue turn/);
+  assert.match(retryHtml, /no cooldown or attempt limit/);
+  assert.doesNotMatch(retryHtml, /Eligible after/);
   assert.match(html, /Running: Current/); assert.match(html, /Pause queue/);
   assert.match(html, /Cancel queued test Next/); assert.match(html, /<details>/);
   assert.match(html, /<ol><li><div class="test-queue-row"><span title="Next">Next<\/span>/);
@@ -337,7 +525,11 @@ test('concurrent queue admissions persist before execution and a dispatch save f
   const calls: string[] = [];
   const backend = await createApp({
     dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
-    evaluate: async input => { calls.push(input.profile.target); return { assessment: assessment(), responseFormat: 'function_call' }; },
+    evaluate: async input => {
+      calls.push(input.profile.target);
+      const result = assessment(); result.scores.contextFit = 4;
+      return { assessment: result, responseFormat: 'function_call' };
+    },
   });
 
   test('bulk redo snapshots saved settings into new queued jobs, preserves originals, and reports per-test failures', async () => {
@@ -347,7 +539,11 @@ test('concurrent queue admissions persist before execution and a dispatch save f
     let calls = 0;
     const backend = await createApp({
       dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
-      evaluate: async () => { calls++; return { assessment: assessment(), responseFormat: 'function_call' }; },
+      evaluate: async () => {
+        calls++;
+        const result = assessment(); result.scores.contextFit = 4; result.scores.accentFit = 4;
+        return { assessment: result, responseFormat: 'function_call' };
+      },
     });
     backend.app.use(backend.errors); server.on('request', backend.app);
     const url = `http://127.0.0.1:${address.port}`;

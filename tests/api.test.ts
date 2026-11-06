@@ -224,6 +224,7 @@ test('evaluation language defaults and market targets reach every judge and role
       calls.push({ language: options.profile.language, targetMarket: options.profile.targetMarket, judge: options.judge.deployment, role: options.role });
       const value = assessment();
       value.scores.accentFit = 4;
+      value.scores.contextFit = 4;
       if (options.profile.speakerMode === 'automatic') {
         assert.ok(options.role);
         value.speakerAttribution = { role: options.role, status: 'identified', evidence: 'Content identifies this role.' };
@@ -315,8 +316,8 @@ test('targeted audio retries preserve good verdicts and audit history, persist t
   });
   app.use(errors); server.on('request', app);
   const url = `http://127.0.0.1:${address.port}`;
-  const post = (id: string, body: unknown) => fetch(`${url}/api/jobs/${id}/resume`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  const post = (id: string, body: Record<string, unknown>) => fetch(`${url}/api/jobs/${id}/resume`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, autoRetry: false }),
   });
   async function wait(id: string): Promise<Job> {
     for (let n = 0; n < 100; n++) {
@@ -390,8 +391,8 @@ test('unassessed-file retries preserve successful judges, isolate files and reco
   });
   app.use(errors); server.on('request', app);
   const url = `http://127.0.0.1:${address.port}`;
-  const post = (id: string, body: unknown) => fetch(`${url}/api/jobs/${id}/resume`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  const post = (id: string, body: Record<string, unknown>) => fetch(`${url}/api/jobs/${id}/resume`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, autoRetry: false }),
   });
   async function wait(id: string): Promise<Job> {
     for (let n = 0; n < 100; n++) {
@@ -527,6 +528,7 @@ test('API persists clips, judges and results; validates requests; retries only i
       calls++;
       if (options.judge.deployment === 'second' && failSecond) throw new Error('Simulated judge failure');
       const value = assessment(4);
+      if (options.profile.target) value.scores.contextFit = 4;
       if (options.profile.speakerMode === 'automatic') {
         assert.ok(options.role);
         value.speakerAttribution = { role: options.role, status: 'identified', evidence: 'Content identifies the requested role.' };
@@ -574,7 +576,7 @@ test('API persists clips, judges and results; validates requests; retries only i
     assert.equal((await request('/api/clips', { clip, pcm: Buffer.alloc(48000).toString('base64') })).status, 201);
     assert.equal((await request('/api/clips', { clip: { ...clip, id: randomUUID() }, pcm: 'bad' })).status, 400);
     assert.equal((await request('/api/clips', { clip: { ...clip, id: randomUUID(), end: 10 }, pcm: Buffer.alloc(48000).toString('base64') })).status, 400);
-    const input = { name: '  Auditions - round 1  ', profile, clipIds: [id], consent: true };
+    const input = { name: '  Auditions - round 1  ', profile, clipIds: [id], consent: true, autoRetry: false };
     assert.equal((await request('/api/jobs', { ...input, name: undefined })).status, 400);
     assert.equal((await request('/api/jobs', { ...input, name: '   ' })).status, 400);
     assert.equal((await request('/api/jobs', { ...input, name: 'a'.repeat(121) })).status, 400);
@@ -598,7 +600,7 @@ test('API persists clips, judges and results; validates requests; retries only i
     const audio = await request(`/api/clips/${id}/audio`);
     assert.equal(audio.status, 200); assert.equal((await audio.arrayBuffer()).byteLength, 48044);
     failSecond = false;
-    assert.equal((await request(`/api/jobs/${created.id}/resume`, { consent: true })).status, 200);
+    assert.equal((await request(`/api/jobs/${created.id}/resume`, { consent: true, autoRetry: false })).status, 200);
     const resumed = await wait(created.id);
     assert.equal(resumed.name, 'Auditions - round 1');
     assert.equal(resumed.results.filter(r => r.status === 'completed').length, 2);
@@ -612,7 +614,7 @@ test('API persists clips, judges and results; validates requests; retries only i
       })).status, 201);
     }
     const automaticResponse = await request('/api/jobs', {
-      name: 'Automatic roles', profile: { ...profile, scope: 'both', speakerMode: 'automatic' }, clipIds: automaticIds, consent: true,
+      name: 'Automatic roles', profile: { ...profile, scope: 'both', speakerMode: 'automatic' }, clipIds: automaticIds, consent: true, autoRetry: false,
     });
     assert.equal(automaticResponse.status, 201);
     const automaticJob = await wait((await automaticResponse.json() as Job).id);
@@ -768,6 +770,7 @@ test('cancellation aborts active judges, skips pending clips, and rejects concur
   let calls = 0;
   const { app, errors, cancelActive } = await createApp({
     dataDir: root, port: address.port, endpoint: 'https://example.openai.azure.com', key: 'test-only',
+    deployments: 'first,second',
     evaluate: options => new Promise((_resolve, reject) => {
       calls++;
       const cancel = () => reject(new Error('Cancelled in test.'));
@@ -802,6 +805,7 @@ test('cancellation aborts active judges, skips pending clips, and rejects concur
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     assert.equal(completed.status, 'cancelled');
+    assert.equal(completed.autoRetry, false, 'Cancelling also disables unlimited automatic retries.');
     assert.ok(completed.results.every(r => r.status === 'cancelled'));
     assert.equal(calls, 2, 'The second recording must not be sent to any judge.');
   } finally {

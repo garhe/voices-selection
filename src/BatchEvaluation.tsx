@@ -16,7 +16,6 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
   const [sourceMode, setSourceMode] = useState<'parent' | 'list'>('parent');
   const [folderPaths, setFolderPaths] = useState('');
   const [preview, setPreview] = useState<BatchPreview>();
-  const [consent, setConsent] = useState(false);
   const [results, setResults] = useState<BatchSubmission[]>([]);
   const [snapshot, setSnapshot] = useState<{ profile: Profile; judges: Judge[] }>();
   // Locale-dependent scoring eligibility is validated per test after folder discovery.
@@ -35,7 +34,7 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
   const queued = results.filter(result => result.id).length;
   const directories = parseFolderPaths(folderPaths);
   function invalidatePreview() {
-    setPreview(undefined); setConsent(false); setResults([]);
+    setPreview(undefined); setResults([]);
   }
   return <section className="card recordings-card" aria-label="Batch evaluation wizard">
     <h2>03 · Batch evaluation wizard</h2>
@@ -64,9 +63,9 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
       <div className="button-row">
         <button className="secondary" disabled={busy || (sourceMode === 'parent' ? !directory.trim() : !directories.length)} onClick={() => void onAction('Previewing batch folders', async () => {
           const next = await onPreview(sourceMode === 'parent' ? { directory } : { directories });
-          setPreview(next); setConsent(false); setResults(previous => previous.filter(result => result.id));
+          setPreview(next); setResults(previous => previous.filter(result => result.id));
         })}>Preview batch</button>
-        <button className="text-button" disabled={busy || !!snapshot} onClick={() => { setStep('settings'); setConsent(false); }}>Back to shared settings</button>
+        <button className="text-button" disabled={busy || !!snapshot} onClick={() => setStep('settings')}>Back to shared settings</button>
       </div>
       {preview && <>
         <p>{preview.tests.length} tests · {preview.tests.reduce((sum, test) => sum + test.files.length, 0)} audio files · {preview.ignoredFiles} non-audio files ignored.</p>
@@ -81,11 +80,11 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
               <td>{result?.id ? 'Submitted to queue' : result?.error ? <span role="alert">{result.error}</span> : issues.length ? issues.join(' ') : 'Ready'}</td></tr>;
           })}</tbody>
         </table></div>
-        <label className="checkbox-label"><input type="checkbox" checked={consent} disabled={busy} onChange={event => setConsent(event.target.checked)} />I have permission to send all selected audio to Azure and accept usage charges for every test and judge.</label>
+        <p className="hint">Submitting sends the selected audio to your configured Azure resource and incurs usage charges for every test, judge and automatic retry. No separate permission confirmation is required.</p>
         <p className="hint">Keep this browser open until submission finishes. Submitted tests are saved and run one at a time through the normal queue, even if the browser closes. Keep the server running. A paused queue stays paused. Results appear in Test Reports with the usual reports and exports.</p>
         {snapshot && <p className="hint">Retries use the original shared settings snapshot. Successfully submitted tests are not submitted again. If source files change, preview these folders again. Start a new batch to use different settings or folders.</p>}
         <div className="button-row">
-          <button className="primary" disabled={busy || !consent || !settingsReady || !pending.length || pending.some(test => errors(test).length > 0)} onClick={() => void onAction('Submitting batch evaluations', async () => {
+          <button className="primary" disabled={busy || !settingsReady || !pending.length || pending.some(test => errors(test).length > 0)} onClick={() => void onAction('Submitting batch evaluations', async () => {
             if (!config) throw new Error('Wait for Azure settings to load.');
             const settings = snapshot ?? structuredClone({ profile, judges: config.judges });
             setSnapshot(settings);
@@ -95,7 +94,7 @@ export function BatchEvaluation({ profile, config, busy, onAction, onPreview, on
             await onRefresh();
           })}>{results.length ? 'Submit remaining tests' : 'Submit all to queue'}</button>
           <button className="secondary" disabled={busy} onClick={() => {
-            setPreview(undefined); setResults([]); setSnapshot(undefined); setConsent(false); setStep('settings');
+            setPreview(undefined); setResults([]); setSnapshot(undefined); setStep('settings');
           }}>Start a new batch</button>
         </div>
         {!!results.length && <p role="status">{queued} submitted · {results.filter(result => result.error).length} failed. Failed tests remain available for retry; no successful test is resubmitted.</p>}

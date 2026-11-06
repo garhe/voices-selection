@@ -1093,6 +1093,17 @@ test('result views include the complete evaluation without a judge-language filt
   assert.match(source, /\{job\.clips\.map\(c => <details className="clip-detail"/);
 });
 
+test('report surfaces and exports expose saved improvement cases without inventing legacy defects', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /<ImprovementEvidence judge=\{judge\} profile=\{job\.profile\} \/>/);
+  assert.match(source, /<ImprovementEvidence judge=\{judge\} profile=\{job\.profile\} dimension=\{d\.dimension\} \/>/);
+  assert.match(source, /<ImprovementEvidence judge=\{evidence\} profile=\{job\.profile\} \/>/);
+  assert.match(source, /This does not establish a perfect performance/);
+  assert.match(source, /row\('dimension_improvement', note/);
+  assert.match(source, /DEFECTS & IMPROVEMENTS:/);
+  assert.match(source, /notes\(d\.improvements\)/);
+});
+
 test('setup disclosures share compact vertical spacing and inset markers with aligned descriptions', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.setup-section\.card \{ padding: 0; \}/);
@@ -1128,7 +1139,7 @@ test('all UI retry actions use the queue without blocking behind unrelated tests
   assert.match(source, /No retry was queued/);
 });
 
-test('folder sorting UI defaults to keeping originals and exposes unlimited inputs and output options', () => {
+test('folder sorting UI defaults to replacement without a confirmation dialog and retains preview and output options', () => {
   const html = renderToStaticMarkup(createElement(FolderSorter, {
     busy: false, onAction: async () => {}, onPreview: async () => { throw new Error('Not called during render.'); },
     onApply: async () => { throw new Error('Not called during render.'); },
@@ -1139,20 +1150,32 @@ test('folder sorting UI defaults to keeping originals and exposes unlimited inpu
   assert.match(html, /with or without surrounding double quotes/);
   assert.match(html, /Spaces in paths are preserved/);
   assert.doesNotMatch(html, /up to 20/);
-  assert.match(html, /value="keep" selected/);
+  assert.match(html, /value="replace" selected/);
   assert.match(html, /Output parent directory/);
   assert.match(html, /Output folder name format/);
   assert.match(html, /\{name\}_sorted/);
-  assert.match(html, /Original folders and all their contents remain unchanged/);
+  assert.match(html, /Replacing originals is permanent/);
   assert.match(html, /Replace originals/);
   assert.match(html, /Preview sorting/);
   assert.doesNotMatch(html, />Confirm replacement<\/button>/);
+  const source = readFileSync(new URL('../src/FolderSorter.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /ConfirmationDialog|setPermission|setConfirm/);
+  assert.match(source, /onClick=\{applyPreview\}/);
   assert.match(html, /class="card sorting-form"/);
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
   assert.match(css, /\.sorting-form\{display:grid;gap:20px\}/);
   assert.match(css, /\.sorting-form>\.field-row\{[^}]*gap:20px;margin:0;/);
   assert.match(css, /\.sorting-form>button\{justify-self:start;margin-top:4px\}/);
   assert.match(css, /@media\(max-width:900px\)\{\.sorting-form>\.field-row\{grid-template-columns:1fr\}\}/);
+});
+
+test('new evaluations load the saved default panel rather than inheriting an old report panel', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const setup = source.split('function beginNewEvaluation() {')[1].split('function updateLanguageAccent')[0];
+  assert.match(setup, /await api<Config>\('\/api\/config'\)/);
+  assert.match(setup, /judges: sortJudges\(configuration\.judges\)/);
+  assert.doesNotMatch(setup, /job\.judges/);
+  assert.match(source, /Save panel as default/);
 });
 
 test('every ranked other voice exports its overall score separately from its name and judge averages', () => {
