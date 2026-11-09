@@ -101,7 +101,8 @@ export async function createApp(options: {
       const selected = unassessedResults(job);
       if (selected.length) {
         prepareRetry(job, selected);
-        job.status = 'queued'; job.queueOrder = ++queueOrder;
+        job.status = 'queued';
+        job.queueOrder = Math.min(0, ...savedJobs.map(saved => saved.queueOrder ?? 0)) - 1;
         await store.saveJob(job);
       }
     }
@@ -155,8 +156,8 @@ export async function createApp(options: {
       results: input.clips.flatMap(clip => input.judges.map(judge => ({ clipId: clip.id, judgeId: judge.id, status: 'pending' }))),
     };
   }
-  async function enqueueEvaluation(job: Job) {
-    job.queueOrder = ++queueOrder;
+  async function enqueueEvaluation(job: Job, first = false) {
+    job.queueOrder = first ? Math.min(0, ...waiting.map(queued => queued.queueOrder ?? 0)) - 1 : ++queueOrder;
     await store.saveJob(job);
     waiting.push(job); waiting.sort((a, b) => a.queueOrder! - b.queueOrder!);
   }
@@ -461,7 +462,7 @@ export async function createApp(options: {
           prepareRetry(job, remaining);
           job.autoRetryCount = (job.autoRetryCount ?? 0) + 1;
           job.status = 'queued';
-          await enqueueEvaluation(job);
+          await enqueueEvaluation(job, true);
         }
       }
     } catch (error) {

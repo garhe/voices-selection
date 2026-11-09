@@ -22,6 +22,7 @@ import type { SortingPreview, SortingResults } from '../shared/sorting';
 import type { BatchPreview, BatchTest } from '../shared/batch';
 import { BatchEvaluation } from './BatchEvaluation';
 import { prepareEvaluationClips } from './evaluation';
+import { EvaluationProgress } from './EvaluationProgress';
 
 type Config = Settings & ConnectionStatus & { rubric: string; runtimeError?: string };
 type History = TestHistory;
@@ -636,8 +637,6 @@ export function App() {
   }
   const summary = job ? summarize(job) : [];
   const voiceEvidence = job ? summarizeVoiceEvidence(job) : [];
-  const finished = job?.results.filter(r => !['pending', 'running'].includes(r.status)).length ?? 0;
-  const failures = job?.results.filter(r => r.status === 'failed').length ?? 0;
   const audioIssues = job?.results.filter(retryableAudioIssue).length ?? 0;
   const fallbackCount = job ? singleSpeakerFallbackCount(job) : 0;
   const unassessed = job ? unassessedInputs(job) : [];
@@ -649,7 +648,6 @@ export function App() {
   const retryHint = rubricChanged ? 'Use Edit inputs to create a test with the current rubric.'
     : !config?.configured ? 'Configure Azure before retrying.'
       : 'Queue one retry for this test. Only selected judges rerun; additional Azure usage applies.';
-  const needsReview = unassessed.reduce((count, input) => count + input.judges.length, 0);
   const queueBlockers = evaluationBlockers({
     name: testName, profile, config, recordings: records, savedClips, scope: profile.scope, speakerMode: profile.speakerMode,
     busy: !!busy, running: false,
@@ -971,18 +969,17 @@ export function App() {
             ? <div className="callout"><strong>Voice-persona rubric:</strong> scores concern audible tone, emotion, vocal character and pleasant, effortless listening, not script logic or service-task quality. Meaning is used only for speaker-role attribution.</div>
             : <div className="callout"><strong>Earlier rubric · {job.rubric}:</strong> these saved scores and comments have not been re-evaluated under the {RUBRIC_VERSION} voice-persona criteria. Use Edit inputs to reuse the saved audio in a new evaluation. Retrying across rubric versions is blocked to avoid mixing judgments.</div>}
           <p className="hint">Evaluation language hint: {displayLanguageHint(job.profile.language)}. {reportText('Per-input hints are shown with each recording.')} Target market/accent: {job.profile.targetMarket || 'Not supplied; accent fit is not scored.'}</p>
-          <div className="progress-track"><div style={{ width: `${finished / job.results.length * 100}%` }} /></div>
+          <EvaluationProgress key={job.id} job={job} recordingQualityLabel={reportText('Recording quality')} />
           {job.profile.rubric && <details className="card voice-evidence"><summary>Saved rubric snapshot · {job.profile.rubric.name} · revision {job.profile.rubric.revision}</summary>
             <p>{job.profile.rubric.instructions}</p><p className="hint">This is the exact rubric saved with this test, independent of later preset edits. Preference uses the active dimensions and their {job.profile.stage === 'audition' ? 'Voice Selection' : 'TTS'} weights below.</p>
             <ul>{profileRubric(job.profile).dimensions.map(d => <li key={d.id}><strong>{d.label}</strong> · weight {dimensionWeight(job.profile, d.id)}{!activeDimensions(job.profile).includes(d.id) && ' (excluded from preference)'}: {d.description}</li>)}</ul>
           </details>}
-          <div className="metrics"><Metric label="Judge assessments finished" value={`${finished} / ${job.results.length}`} /><Metric label="Failures" value={String(failures)} /><Metric label="Unassessable / partial" value={String(needsReview)} /><Metric label={reportText('Recording quality')} value={activeDimensions(job.profile).includes('audioQuality') ? 'Included' : 'Diagnostic only'} /></div>
           <div className="callout">{reportText('Scores are uncalibrated AI opinions on a 1–5 scale, not MOS. Consensus requires every configured judge. In automatic mode, windows unanimously marked role not present are excluded and counted; ambiguous roles, disagreements and failures prevent the recording from entering the preference average. The overall preference score uses the rubric weights for active dimensions; it is not a probability or proof of voice superiority.')}</div>
           <section className="card"><div className="section-with-action"><div><h2>{reportText('Recording-set comparison')}</h2><p className="hint">{reportText('Duration-weighted regions → one recording score → equal-weight recording average. Agent and customer requests stay separate; fallback is explicitly labelled.')}</p></div></div>
             <p className="hint">Weighted Preference ({WEIGHTED_PREFERENCE.version}) is an experimental comparison from the same saved ratings: naturalness 35%, expressiveness 25%, articulation 15%, target-style fit 10%, pace 10%, accent fit 5%. Only active dimensions contribute; their weights are renormalized. Audio quality is excluded from this metric in both stages. Original eligibility, equal judge weights and recording aggregation are preserved. No new Azure calls. These weights are not validated against human preferences.</p>
-            <div className="table-scroll"><table><thead><tr><th>Voice / requested role</th><th>Eligible files</th><th>Preference</th><th>Weighted Preference</th><th>Weighted − Preference</th>{activeDimensions(job.profile).map(d => <th key={d}>{dimensionLabel(job.profile, d)}</th>)}<th>Judge spread</th></tr></thead><tbody>
+            <div className="table-scroll"><table><thead><tr><th>Voice / requested role</th><th>Eligible files</th><th>Preference</th><th>Weighted Preference</th>{activeDimensions(job.profile).map(d => <th key={d}>{dimensionLabel(job.profile, d)}</th>)}<th>Judge spread</th></tr></thead><tbody>
               {summary.map(s => <SummaryRow key={JSON.stringify([s.voice, s.role])} summary={s} dimensions={activeDimensions(job.profile)} />)}
-              {!summary.length && <tr><td colSpan={6 + activeDimensions(job.profile).length}>{reportText('No recording evidence is available yet.')}</td></tr>}
+              {!summary.length && <tr><td colSpan={5 + activeDimensions(job.profile).length}>{reportText('No recording evidence is available yet.')}</td></tr>}
             </tbody></table></div>
             <p className="hint">{reportText('Judge spread = mean per-region max–min preference score. It is disagreement, not a confidence interval. Recording score ranges and language labels appear below; language mixes and unequal recording sets can bias comparisons.')}</p>
             <p className="hint">Ranking, best-voice labels and judge spread still use the original Preference. Weighted Preference does not reward agreement or alter saved assessments. If only audio quality is active, Weighted Preference is not assessed.</p>
@@ -1049,10 +1046,6 @@ export function App() {
 function SectionTitle({ step, title, description }: { step: string; title: string; description: string }) {
   return <div className="section-title"><span>{step}</span><h2>{title}</h2><p>{description}</p></div>;
 }
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
-}
 function SummaryRow({ summary: s, dimensions: ds }: { summary: Summary; dimensions: Dimension[] }) {
-  const delta = s.score !== null && s.weightedScore !== null ? s.weightedScore - s.score : null;
-  return <tr><td><strong>{s.voice}</strong><small>{s.role}</small></td><td>{s.eligibleFiles} / {s.files}</td><td><span className="score">{score(s.score)}</span></td><td><span className="score">{score(s.weightedScore)}</span></td><td>{delta === null ? 'Not assessed' : `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`}</td>{ds.map(d => <td key={d}>{score(s.dimensions[d])}</td>)}<td>{score(s.disagreement)}</td></tr>;
+  return <tr><td><strong>{s.voice}</strong><small>{s.role}</small></td><td>{s.eligibleFiles} / {s.files}</td><td><span className="score">{score(s.score)}</span></td><td><span className="score">{score(s.weightedScore)}</span></td>{ds.map(d => <td key={d}>{score(s.dimensions[d])}</td>)}<td>{score(s.disagreement)}</td></tr>;
 }

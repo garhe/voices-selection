@@ -44,7 +44,7 @@ test('fresh installations default to five judges and saved panels survive restar
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('automatic retries immediately exceed five attempts without cooldowns and preserve successes until every judge is assessable', async () => {
+test('automatic retries finish before later tests without cooldowns or attempt limits and preserve successful judgments', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'voice-auto-retries-'));
   const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -117,8 +117,8 @@ test('automatic retries immediately exceed five attempts without cooldowns and p
     assert.equal(history[3].assessment!.speakerAttribution!.status, 'not_present');
     assert.equal(history[6].assessment!.scores.pace, null);
     assert.equal((await readJob(other.id)).status, 'completed');
-    assert.deepEqual(calls, ['Needs retries', 'Needs retries', 'Other test', 'Other test', ...Array(7).fill('Needs retries')],
-      'Retries have no cooldown but must not jump ahead of an already queued test.');
+    assert.deepEqual(calls, [...Array(9).fill('Needs retries'), 'Other test', 'Other test'],
+      'Every retry of the current test must finish before an already queued test starts.');
     assert.deepEqual(await backend.store.read(path.join('jobs', `${done.id}.json`)), done);
   } finally {
     firstGate.release(); backend.cancelActive(); server.close(); await once(server, 'close');
@@ -163,8 +163,8 @@ test('immediate retries remain pausable and cancellable across restart and disca
     const ready = await add('Ready');
     firstGate.release();
     const queued = await until(state, value => !value.active && value.waiting.length === 2);
-    assert.deepEqual(queued.waiting.map(job => job.id), [ready.id, original.id]);
-    assert.equal(queued.waiting[1].autoRetryCount, 1);
+    assert.deepEqual(queued.waiting.map(job => job.id), [original.id, ready.id]);
+    assert.equal(queued.waiting[0].autoRetryCount, 1);
     assert.equal(calls, 1, 'Pause prevents the immediately queued retry from starting.');
     for (const id of [original.id, ready.id]) {
       const saved = await backend.store.read<Job>(path.join('jobs', `${id}.json`));
@@ -175,7 +175,7 @@ test('immediate retries remain pausable and cancellable across restart and disca
     backend = await createApp(options); backend.app.use(backend.errors);
     const restarted = await state();
     assert.equal(restarted.paused, true);
-    assert.deepEqual(restarted.waiting.map(job => job.id), [ready.id, original.id]);
+    assert.deepEqual(restarted.waiting.map(job => job.id), [original.id, ready.id]);
     assert.ok(restarted.waiting.every(job => !('retryAfter' in job)));
     for (const id of [original.id, ready.id])
       assert.equal((await backend.store.read<Job>(path.join('jobs', `${id}.json`))).retryAfter, undefined,
@@ -199,10 +199,13 @@ test('immediate retries remain pausable and cancellable across restart and disca
     assert.equal((await state()).waiting.length, 0, 'Older completed tests are not silently opted into unlimited paid retries.');
     legacy.autoRetry = true; legacy.status = 'interrupted';
     await backend.store.saveJob(legacy);
+    await post('/api/queue/pause', {});
+    const later = await add('Later');
     backend.cancelActive();
     backend = await createApp(options); backend.app.use(backend.errors);
     assert.equal((await state()).paused, true);
-    assert.equal((await state()).waiting[0].id, legacy.id, 'An opted-in interrupted test is restored to the paused queue.');
+    assert.deepEqual((await state()).waiting.map(job => job.id), [legacy.id, later.id],
+      'An opted-in interrupted test is restored ahead of later waiting tests.');
   } finally {
     firstGate.release(); backend.cancelActive(); server.close(); await once(server, 'close');
     await rm(root, { recursive: true, force: true });
@@ -501,12 +504,10 @@ test('queue panel stays compact and exposes ordered waiting tests, cancellation 
   }));
   assert.equal(render({ paused: false, waiting: [] }), '');
   const html = render({ paused: false, active: { id: 'active', name: 'Current' }, waiting: [{ id: 'next', name: 'Next' }] });
-  assert.match(html, /no cooldown or attempt limit/);
-  assert.match(html, /may never resolve a genuine limitation/);
+  assert.doesNotMatch(html, /Incomplete tests immediately/);
   const retryHtml = render({ paused: false, waiting: [{ id: 'next', name: 'Next', retry: true, autoRetryCount: 6 }] });
   assert.match(retryHtml, /Automatic retry 6/);
-  assert.match(retryHtml, /Ready for its queue turn/);
-  assert.match(retryHtml, /no cooldown or attempt limit/);
+  assert.match(retryHtml, /Later tests wait until this test finishes/);
   assert.doesNotMatch(retryHtml, /Eligible after/);
   assert.match(html, /Running: Current/); assert.match(html, /Pause queue/);
   assert.match(html, /Cancel queued test Next/); assert.match(html, /<details>/);

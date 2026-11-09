@@ -93,6 +93,20 @@
 .unassessed-input ul{margin:8px 0 16px}
 .unassessed-input>div:last-child>:last-child{margin-bottom:0}
 .assessment-explanation{margin:16px 0}
+.assessment-activity{margin:-8px 0 20px;overflow-wrap:anywhere}
+.assessment-activity h2{font-size:var(--text-ui)}
+.assessment-activity ul{margin:8px 0;padding-left:22px}
+.assessment-activity li{margin:8px 0}
+.assessment-activity small{display:block;color:var(--mica-muted)}
+.metric.metric-action{font:inherit;text-align:left;align-items:flex-start;cursor:pointer;white-space:normal}
+.metric.metric-action[aria-expanded=true]{outline:2px solid var(--theme-accent);outline-offset:2px}
+.metric.metric-action:hover span,.metric.metric-action:hover strong,.metric.metric-action:focus-visible span,.metric.metric-action:focus-visible strong{color:inherit}
+.assessment-issues{margin-bottom:20px;overflow-wrap:anywhere}
+.assessment-issues[hidden]{display:none}
+.assessment-issues td{vertical-align:top;white-space:normal;min-width:120px}
+.assessment-issues td:nth-child(2),.assessment-issues td:last-child{min-width:240px}
+.assessment-issues td small{display:block}
+.assessment-issues td ul{margin:0;padding-left:18px}
 @media(max-width:1200px){.evaluation-action-bar{left:240px}}
 @media(max-width:760px){.evaluation-action-bar{left:64px;padding:10px 12px}.setup-workspace{--evaluation-actions-height:176px}}
 .status-badge.queued{background:#e5edf8;color:#355d8c}
